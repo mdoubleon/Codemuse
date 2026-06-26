@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>CodeMuse</title>
+    <link rel="icon" type="image/webp" href="/assets/codemuse-logo.webp">
+    <link rel="preload" as="image" href="/assets/cat-idle-1.webp">
+    <link rel="preload" as="image" href="/assets/cat-work-1.webp">
+    <link rel="stylesheet" href="/styles.css">
+    <style>
+      
+      :root {
+        --cm-topbar-height: 64px;
+        --cm-sidebar-width: 180px;
+      }
+
+      .session-drawer[hidden] {
+        display: none !important;
+      }
+
+      .sidebar {
+        position: relative;
+        z-index: 80;
+      }
+
+      .session-drawer {
+        position: fixed !important;
+        top: var(--cm-topbar-height) !important;
+        left: var(--cm-sidebar-width) !important;
+        bottom: 0 !important;
+        width: min(340px, calc(100vw - var(--cm-sidebar-width) - 24px)) !important;
+        max-width: calc(100vw - var(--cm-sidebar-width) - 24px) !important;
+        height: auto !important;
+        z-index: 70 !important;
+        display: flex;
+        flex-direction: column;
+        background: #fff;
+        border-right: 1px solid #e5e7eb;
+        box-shadow: 16px 0 40px rgba(15, 23, 42, 0.08);
+        transform: none !important;
+        pointer-events: auto;
+      }
+
+      .session-drawer header {
+        flex-shrink: 0;
+      }
+
+      .session-list {
+        overflow: auto;
+      }
+
+      @media (max-width: 720px) {
+        .session-drawer {
+          left: 0 !important;
+          width: min(86vw, 340px) !important;
+          max-width: 86vw !important;
+          z-index: 90 !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <button class="brand" data-panel-target="workbench" type="button" aria-label="返回工作台">
+          <span class="brand-mark">
+            <img class="brand-logo" src="/assets/codemuse-logo.webp" alt="">
+          </span>
+          <span class="brand-text">
+            <strong>CodeMuse</strong>
+            <small id="workspace">正在连接工作区…</small>
+          </span>
+        </button>
+
+        <label class="command-box">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M11.74 10.34 14.5 13.1l-1.4 1.4-2.76-2.76a6 6 0 1 1 1.4-1.4ZM7 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/></svg>
+          <input id="command-input" type="text" placeholder="搜索记忆、会话或输入快捷命令 (/memory <kbd>·</kbd> /new <kbd>·</kbd> /refresh)" autocomplete="off">
+          <kbd class="kbd-hint">Ctrl K</kbd>
+        </label>
+
+        <div class="top-actions">
+          <button id="refresh" class="btn btn-ghost" type="button" title="刷新工作台">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 3V1l4 3-4 3V5a3 3 0 1 0 3 3h1.5A4.5 4.5 0 1 1 8 3.5V3Z"/></svg>
+            <span>刷新</span>
+          </button>
+          <button id="stop-button" class="btn btn-ghost btn-danger" type="button" disabled title="请求中断当前任务">
+            <span class="dot" aria-hidden="true"></span>
+            <span>停止</span>
+          </button>
+          <button id="new-session" class="btn btn-primary" type="button">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M9 7V2H7v5H2v2h5v5h2V9h5V7Z"/></svg>
+            <span>新任务</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar" aria-label="主导航">
+          <nav class="nav-list" aria-label="工作区">
+            <button class="nav-item nav-entry active" data-panel-target="workbench" type="button">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M8 1 1 6v9h5V9h4v6h5V6Z"/></svg>
+              </span>
+              <span class="nav-body"><strong>工作台</strong><small>对话与执行</small></span>
+            </button>
+            <button class="nav-item nav-entry" data-panel-target="approvals" type="button">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-.5 10L4 7.5l1.4-1.4L7.5 8.2l3.1-3.1L12 6.5Z"/></svg>
+              </span>
+              <span class="nav-body"><strong>审批</strong><small id="nav-approval-hint">无待审批</small></span>
+              <span id="nav-approval-badge" class="badge-dot" hidden></span>
+            </button>
+            <button class="nav-item nav-entry" data-panel-target="memory" type="button">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M3 2h7l3 3v9H3Zm6 0v4h4"/></svg>
+              </span>
+              <span class="nav-body"><strong>项目记忆</strong><small>索引和检索</small></span>
+            </button>
+            <button class="nav-item nav-entry" data-panel-target="repo" type="button">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M2 4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v9a1 1 0 0 1-1 1H5a1 1 0 0 1 0-2h7V4H4v8a1 1 0 1 1-2 0Z"/></svg>
+              </span>
+              <span class="nav-body"><strong>项目连接</strong><small>仓库和评测</small></span>
+            </button>
+            <button class="nav-item nav-entry" data-panel-target="api" type="button">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M8 1a3 3 0 0 1 3 3v1h2v2h-1v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7H3V5h2V4a3 3 0 0 1 3-3Zm0 2a1 1 0 0 0-1 1v1h2V4a1 1 0 0 0-1-1Z"/></svg>
+              </span>
+              <span class="nav-body"><strong>模型 API</strong><small>Provider 配置</small></span>
+            </button>
+            <button class="nav-item nav-entry" data-panel-target="capabilities" type="button">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="m8 1 2 4 4 .5-3 3 .8 4.3L8 10.7 4.2 12.8 5 8.5 2 5.5 6 5Z"/></svg>
+              </span>
+              <span class="nav-body"><strong>可用能力</strong><small>工具和扩展</small></span>
+            </button>
+            <button class="nav-item nav-entry" data-panel-target="sessions" type="button">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16"><path fill="currentColor" d="M8 1a7 7 0 1 1-7 7h2a5 5 0 1 0 1.5-3.5L6 6H1V1l1.6 1.6A7 7 0 0 1 8 1Zm-1 4h1.5v3.3l2.4 1.4-.8 1.3L7 9.2Z"/></svg>
+              </span>
+              <span class="nav-body"><strong>历史会话</strong><small id="nav-sessions-hint">0 个会话</small></span>
+            </button>
+          </nav>
+
+          <div class="sidebar-foot">
+            <section class="agent-card">
+              <img id="agent-mascot" class="agent-mascot idle" src="/assets/cat-idle-1.webp" alt="" loading="eager">
+              <div class="agent-card-body">
+                <strong id="runtime-status">Agent 空闲</strong>
+                <small id="agent-motion-label">等待下一条任务</small>
+              </div>
+            </section>
+            <section class="mini-stats" aria-label="会话统计">
+              <div><strong id="session-total">0</strong><span>会话</span></div>
+              <div><strong id="active-count">0</strong><span>运行</span></div>
+              <div><strong id="approval-count">0</strong><span>待审批</span></div>
+            </section>
+          </div>
+        </aside>
+
+        <section id="workbench" class="workbench">
+          <section class="conversation-panel">
+            <header class="panel-header">
+              <div class="title-group">
+                <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+                <div class="title-text">
+                  <h1>Agent 工作台</h1>
+                  <p>
+                    <span id="session-state">暂无会话</span>
+                    <span class="sep" aria-hidden="true">·</span>
+                    <span id="status-pill">Idle</span>
+                  </p>
+                </div>
+              </div>
+              <div class="panel-actions">
+                <button id="checkpoint" class="btn btn-soft" type="button" title="创建检查点">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M2 2h12v2H2Zm0 5h12v2H2Zm0 5h8v2H2Z"/></svg>
+                  <span>检查点</span>
+                </button>
+                <button class="btn btn-soft" data-panel-target="approvals" type="button">审批</button>
+                <button class="btn btn-soft" data-panel-target="sessions" type="button">历史</button>
+                <button id="toggle-terminal" class="btn btn-soft" type="button" aria-pressed="false" title="显示/隐藏执行流">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M2 2h12v12H2Zm1.5 3.3 2.2 1.8-2.2 1.8.6.8 3-2.6-3-2.6Z"/></svg>
+                  <span>终端</span>
+                </button>
+              </div>
+            </header>
+
+            <section id="events" class="messages" aria-label="对话和执行事件"></section>
+
+            <section id="terminal-pane" class="terminal-pane" hidden>
+              <header class="terminal-head">
+                <div>
+                  <strong>执行流</strong>
+                  <span>Session <b id="stat-session">未创建</b></span>
+                </div>
+                <div>
+                  <span>Phase <b id="phase-state">idle</b></span>
+                  <span>Queue <b id="queue-count">0</b></span>
+                </div>
+              </header>
+              <section id="terminal-feed" class="terminal-feed" aria-label="执行日志"></section>
+            </section>
+
+            <form id="prompt-form" class="composer">
+              <div class="composer-shell">
+                <textarea id="prompt" rows="1" placeholder="问问 CodeMuse 任何事…  例如 list files / read README.md / 搜索 ToolRegistry"></textarea>
+                <button id="send" class="send-button" type="submit" aria-label="发送">
+                  <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="m1 8 14-6-6 14-2-6Z"/></svg>
+                </button>
+              </div>
+              <div class="composer-foot">
+                <span id="prompt-feedback" class="prompt-feedback" aria-live="polite"></span>
+                <span class="composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
+              </div>
+            </form>
+          </section>
+
+          <aside class="inspector" aria-label="项目状态和工具">
+            <nav class="tabs" role="tablist">
+              <button class="tab active" data-tab="approvals" role="tab" type="button">
+                <span>任务</span>
+                <span id="active-run-count" class="tab-count">0</span>
+              </button>
+              <button class="tab" data-tab="memory" role="tab" type="button">
+                <span>记忆</span>
+              </button>
+              <button class="tab" data-tab="repo" role="tab" type="button">
+                <span>项目</span>
+              </button>
+              <button class="tab" data-tab="api" role="tab" type="button">
+                <span>模型</span>
+              </button>
+              <button class="tab" data-tab="capabilities" role="tab" type="button">
+                <span>能力</span>
+              </button>
+            </nav>
+
+            <div class="tab-body">
+              <section id="approvals-panel" class="tab-panel active" role="tabpanel" data-tab="approvals">
+                <div class="status-grid">
+                  <div class="stat-card">
+                    <strong id="checkpoint-count">0</strong>
+                    <span>检查点</span>
+                  </div>
+                  <div class="stat-card">
+                    <strong id="failed-count">0</strong>
+                    <span>失败</span>
+                  </div>
+                </div>
+                <div class="section-head">
+                  <h3>等待审批</h3>
+                </div>
+                <div id="approvals" class="stack"></div>
+                <details class="fold">
+                  <summary>检查点记录</summary>
+                  <div id="checkpoints" class="stack compact"></div>
+                </details>
+              </section>
+
+              <section id="memory-panel" class="tab-panel" role="tabpanel" data-tab="memory" hidden>
+                <div class="section-head">
+                  <h3>项目记忆</h3>
+                  <button id="memory-index" class="btn btn-text" type="button">重建索引</button>
+                </div>
+                <p class="muted">从真实索引中检索上下文片段</p>
+                <form id="memory-form" class="inline-form">
+                  <input id="memory-query" type="search" placeholder="搜索项目记忆…">
+                  <button class="btn btn-soft" type="submit">搜索</button>
+                </form>
+                <div id="memory-results" class="stack compact"></div>
+              </section>
+
+              <section id="repo-panel" class="tab-panel" role="tabpanel" data-tab="repo" hidden>
+                <div class="section-head">
+                  <h3>项目连接</h3>
+                  <button id="repo-refresh" class="btn btn-text" type="button">刷新</button>
+                </div>
+                <p id="repo-status" class="muted">尚未加载仓库状态</p>
+                <div id="repo-cache" class="stack compact"></div>
+                <div class="summary-line">
+                  <span>最近报告</span>
+                  <strong id="report-summary">尚未加载</strong>
+                  <button id="report-refresh" class="btn btn-text" type="button">更新</button>
+                </div>
+              </section>
+
+              <section id="api-panel" class="tab-panel" role="tabpanel" data-tab="api" hidden>
+                <div class="section-head">
+                  <h3>模型 API</h3>
+                  <button id="api-refresh" class="btn btn-text" type="button">刷新</button>
+                </div>
+                <p id="api-status" class="muted">尚未读取配置</p>
+                <form id="api-form" class="api-form">
+                  <label><span>Provider</span><select id="api-provider"></select></label>
+                  <label><span>Model</span><input id="api-model" type="text" placeholder="例如 gpt-4.1-mini"></label>
+                  <label><span>Base URL</span><input id="api-base-url" type="url" placeholder="https://api.openai.com/v1"></label>
+                  <label><span>API Key 环境变量名</span><input id="api-key-env" type="text" placeholder="OPENAI_API_KEY"></label>
+                  <button class="btn btn-primary btn-block" type="submit">保存配置</button>
+                </form>
+                <details class="fold">
+                  <summary>Provider 状态</summary>
+                  <div id="provider-list" class="stack compact"></div>
+                </details>
+              </section>
+
+              <section id="capabilities-panel" class="tab-panel" role="tabpanel" data-tab="capabilities" hidden>
+                <div class="section-head">
+                  <h3>可用能力</h3>
+                </div>
+                <p class="muted">工具、技能和扩展清单</p>
+                <div id="capabilities" class="stack compact"></div>
+              </section>
+            </div>
+          </aside>
+        </section>
+
+        <aside id="sessions-panel" class="session-drawer" aria-label="历史会话" hidden>
+          <header>
+            <div>
+              <span class="eyebrow">SESSIONS</span>
+              <h2>历史会话</h2>
+            </div>
+            <button id="close-sessions" class="btn btn-soft" type="button" aria-label="关闭历史">关闭</button>
+          </header>
+          <div id="sessions" class="session-list"></div>
+        </aside>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+    <script>
+      (() => {
+        const initSessionDrawer = () => {
+          const sessionsPanel = document.getElementById("sessions-panel");
+          const root = document.documentElement;
+
+          if (!sessionsPanel) return;
+          if (sessionsPanel.dataset.fixedDrawerReady === "true") return;
+          sessionsPanel.dataset.fixedDrawerReady = "true";
+
+          const sessionTriggers = () => Array.from(document.querySelectorAll('[data-panel-target="sessions"]'));
+          const navEntries = () => Array.from(document.querySelectorAll(".nav-entry"));
+
+          const syncDrawerPosition = () => {
+            const topbar = document.querySelector(".topbar");
+            const sidebar = document.querySelector(".sidebar");
+
+            if (topbar) {
+              root.style.setProperty("--cm-topbar-height", `${Math.ceil(topbar.getBoundingClientRect().height)}px`);
+            }
+
+            if (sidebar) {
+              root.style.setProperty("--cm-sidebar-width", `${Math.ceil(sidebar.getBoundingClientRect().width)}px`);
+            }
+          };
+
+          const setSessionButtonState = (isOpen) => {
+            sessionTriggers().forEach((button) => {
+              button.setAttribute("aria-expanded", String(isOpen));
+            });
+          };
+
+          const setActiveNav = (target) => {
+            navEntries().forEach((item) => {
+              item.classList.toggle("active", item.dataset.panelTarget === target);
+            });
+          };
+
+          const openSessions = () => {
+            syncDrawerPosition();
+            sessionsPanel.hidden = false;
+            sessionsPanel.classList.add("open");
+            document.body.classList.add("sessions-open");
+            setSessionButtonState(true);
+            setActiveNav("sessions");
+          };
+
+          const closeSessions = () => {
+            sessionsPanel.hidden = true;
+            sessionsPanel.classList.remove("open");
+            document.body.classList.remove("sessions-open");
+            setSessionButtonState(false);
+          };
+
+          closeSessions();
+          syncDrawerPosition();
+          window.addEventListener("resize", syncDrawerPosition);
+
+          if ("ResizeObserver" in window) {
+            const sidebar = document.querySelector(".sidebar");
+            const topbar = document.querySelector(".topbar");
+            const observer = new ResizeObserver(syncDrawerPosition);
+            if (sidebar) observer.observe(sidebar);
+            if (topbar) observer.observe(topbar);
+          }
+
+          document.addEventListener(
+            "click",
+            (event) => {
+              const closeTarget = event.target.closest("#close-sessions");
+              if (closeTarget) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                closeSessions();
+                return;
+              }
+
+              const panelTargetButton = event.target.closest("[data-panel-target]");
+              if (!panelTargetButton) return;
+
+              const target = panelTargetButton.dataset.panelTarget;
+
+              if (target === "sessions") {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                openSessions();
+                return;
+              }
+
+              closeSessions();
+            },
+            true
+          );
+        };
+
+        initSessionDrawer();
+        document.addEventListener("DOMContentLoaded", initSessionDrawer, { once: true });
+      })();
+    </script>
+  </body>
+</html>

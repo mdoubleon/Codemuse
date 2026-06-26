@@ -1,0 +1,16 @@
+﻿__pycache__/
+*.pyc
+.env
+.codemuse/
+.private_notes/
+.venv/
+.data/
+.tmp_eval_reports/
+artifacts/demo/
+evals/reports/
+.server-*.log
+.server-*.err.log
+.server-*.out.log
+dist/
+build/
+*.egg-info/
