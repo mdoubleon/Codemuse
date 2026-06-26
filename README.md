@@ -1,8 +1,12 @@
 # CodeMuse
 
+
 CodeMuse 是一个个人 Coding Agent 学习项目。
 
-最初做这个项目的目的很简单：帮助刚开始学习 Agent 工程的人，能更快看懂一个本地 Coding Agent 是怎么组织起来的，也能参考其他 Agent 项目的常见设计思路，把“模型、工具、记忆、审批、会话、前端”这些概念真正串起来。
+<img width="1254" height="686" alt="12dfde6d2d8e41c46d605482b207a86e" src="https://github.com/user-attachments/assets/684a9690-2d05-472d-87a4-a3c947678407" />
+
+
+做这个项目的目的很简单：帮助刚开始学习 Agent 工程的人，能更快看懂一个本地 Coding Agent 是怎么组织起来的，也能参考其他 Agent 项目的常见设计思路，把“模型、工具、记忆、审批、会话、前端”这些概念真正串起来。
 
 这个项目不是为了做一个最大、最复杂的 Agent，而是希望把核心链路拆得足够清楚：
 
