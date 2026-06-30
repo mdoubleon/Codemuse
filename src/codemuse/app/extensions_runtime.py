@@ -1,4 +1,4 @@
-"""Expose discovered workspace extensions as metadata capabilities."""
+"""提供应用装配中 extensions runtime 相关实现。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,18 +11,22 @@ from codemuse.extensions.loader import ExtensionDescriptor, load_extensions
 
 @dataclass
 class ExtensionRuntime:
+    """管理 ExtensionRuntime 运行时的状态、发现和执行入口。"""
     workspace: Path
     _extensions: dict[str, ExtensionDescriptor] | None = field(default=None, init=False, repr=False)
 
     def available_extensions(self) -> dict[str, ExtensionDescriptor]:
+        """处理 availableextensions。"""
         if self._extensions is None:
             self._extensions = load_extensions(self.workspace)
         return self._extensions
 
     def reload(self) -> None:
+        """处理 reload。"""
         self._extensions = None
 
     def run_extension(self, *, name: str, action: str = "default", input_text: str = "") -> dict[str, object]:
+        """运行扩展。"""
         extensions = self.available_extensions()
         if name not in extensions:
             raise ValueError(f"Unknown extension: {name}")
@@ -53,6 +57,7 @@ class ExtensionRuntime:
         }
 
     def dynamic_tools(self) -> list[dict[str, object]]:
+        """处理 动态tools。"""
         tools: list[dict[str, object]] = []
         for extension in self.available_extensions().values():
             if extension.status != "loaded":
@@ -76,6 +81,7 @@ class ExtensionRuntime:
         return tools
 
     def _manifest_payload(self, extension: ExtensionDescriptor) -> dict[str, object]:
+        """处理 清单载荷。"""
         manifest = extension.path / "EXTENSION.json"
         if not manifest.exists():
             manifest = extension.path / "extension.json"
@@ -88,6 +94,7 @@ class ExtensionRuntime:
             return {}
 
     def _response_template(self, payload: dict[str, object], action: str) -> str:
+        """处理 响应template。"""
         for item in payload.get("tools", []):
             if isinstance(item, dict) and item.get("name") == action and isinstance(item.get("response_template"), str):
                 return str(item["response_template"])
@@ -98,9 +105,11 @@ class ExtensionRuntime:
 
 @dataclass
 class ExtensionCapabilityDiscoveryProvider:
+    """提供 ExtensionCapabilityDiscoveryProvider 的能力发现或适配逻辑。"""
     runtime: ExtensionRuntime
 
     def discover(self) -> list[CapabilityDescriptor]:
+        """发现应用装配。"""
         descriptors: list[CapabilityDescriptor] = []
         for extension in self.runtime.available_extensions().values():
             descriptors.append(
@@ -128,4 +137,5 @@ class ExtensionCapabilityDiscoveryProvider:
         return descriptors
 
     def reload(self) -> None:
+        """处理 reload。"""
         self.runtime.reload()

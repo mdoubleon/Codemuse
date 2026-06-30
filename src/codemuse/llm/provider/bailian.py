@@ -18,6 +18,7 @@ class BailianProvider(OpenAICompatibleProvider):
         base_url: str = DEFAULT_BAILIAN_BASE_URL,
         timeout_seconds: int = 60,
     ) -> None:
+        """初始化 BailianProvider 并保存运行依赖。"""
         super().__init__(
             model=model,
             base_url=base_url,

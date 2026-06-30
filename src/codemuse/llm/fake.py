@@ -217,11 +217,12 @@ class FakeLLM:
 
     @staticmethod
     def _tool_call(name: str, arguments: dict) -> ToolCall:
-        """为该流程的公共逻辑提供局部辅助处理。"""
+        """为 FakeLLM 构造带随机 id 的工具调用对象。"""
         return ToolCall(id=str(uuid.uuid4()), name=name, arguments=arguments)
 
     @staticmethod
     def _asks_for_repo_import(lowered: str) -> bool:
+        """判断用户输入是否在请求生成仓库导入计划。"""
         return any(
             item in lowered
             for item in [
@@ -235,18 +236,22 @@ class FakeLLM:
 
     @staticmethod
     def _asks_to_import_repository(lowered: str) -> bool:
+        """判断用户输入是否在请求执行已批准的仓库导入。"""
         return any(item in lowered for item in ["import repository", "approved import", "clone repository", "导入仓库"])
 
     @staticmethod
     def _asks_for_repo_status(lowered: str) -> bool:
+        """判断用户输入是否在请求查看仓库 Git 状态或 diff。"""
         return any(item in lowered for item in ["repo status", "git status", "repo diff", "git diff"])
 
     @staticmethod
     def _asks_for_repo_cache(lowered: str) -> bool:
+        """判断用户输入是否在请求查看仓库导入缓存。"""
         return any(item in lowered for item in ["repo cache", "list repo cache", "import cache"])
 
     @staticmethod
     def _asks_for_project_plan(lowered: str) -> bool:
+        """判断用户是否请求for项目计划?"""
         return any(
             item in lowered
             for item in [
@@ -379,10 +384,12 @@ class FakeLLM:
 
     @staticmethod
     def _asks_for_subagent_plan(lowered: str) -> bool:
+        """判断用户是否请求for子 Agent计划?"""
         return any(item in lowered for item in ["subagent plan", "multi subagent", "run subagent plan"])
 
     @staticmethod
     def _asks_for_dynamic_extension_tool(lowered: str) -> bool:
+        """判断用户是否请求for动态扩展工具?"""
         return any(item in lowered for item in ["extension tool", "dynamic extension tool"])
 
     @staticmethod
@@ -400,7 +407,7 @@ class FakeLLM:
 
     @staticmethod
     def _extract_search_query(text: str) -> str:
-        """从用户输入或文本中提取后续处理需要的字段。"""
+        """从用户输入中提取记忆或仓库搜索查询。"""
         cleaned = text
         for marker in [
             "search blueprint",
@@ -489,6 +496,7 @@ class FakeLLM:
 
     @staticmethod
     def _extract_repo_source(text: str) -> str:
+        """提取仓库源码。"""
         url = re.search(r"https?://[^\s\"']+", text)
         if url:
             return url.group(0).rstrip("),.;")
@@ -514,11 +522,13 @@ class FakeLLM:
 
     @staticmethod
     def _extract_destination(text: str) -> str:
+        """提取目标路径。"""
         match = re.search(r"(?:destination|dest):\s*([^\s]+)", text, re.IGNORECASE)
         return match.group(1) if match else ""
 
     @staticmethod
     def _extract_plan_goal(text: str) -> str:
+        """提取计划目标。"""
         cleaned = text
         for marker in ["build project plan", "project plan", "task breakdown", "blueprint plan", "implementation plan"]:
             cleaned = re.sub(re.escape(marker), "", cleaned, flags=re.IGNORECASE)
@@ -554,7 +564,7 @@ class FakeLLM:
 
     @staticmethod
     def _memory_title(text: str) -> str:
-        """为该流程的公共逻辑提供局部辅助处理。"""
+        """根据用户输入生成项目记忆的简短标题。"""
         cleaned = re.sub(r"(?i)save project memory|remember this", "", text)
         cleaned = cleaned.replace("记住这个", "").replace("保存项目记忆", "").replace("保存学习记忆", "")
         cleaned = cleaned.strip(" ：:")
@@ -562,7 +572,7 @@ class FakeLLM:
 
     @staticmethod
     def _subagent_task(text: str) -> str:
-        """为该流程的公共逻辑提供局部辅助处理。"""
+        """从用户输入中提取要交给子 Agent 的任务文本。"""
         cleaned = re.sub(r"(?i)use subagent|spawn subagent|subagent", "", text)
         cleaned = cleaned.replace("子agent", "").replace("子代理", "").replace("派生一个", "").replace("让子任务", "")
         cleaned = cleaned.strip(" ：:")
@@ -570,7 +580,7 @@ class FakeLLM:
 
     @staticmethod
     def _answer_from_tool(message: ChatMessage) -> str:
-        """为该流程的公共逻辑提供局部辅助处理。"""
+        """把工具 observation 转换成 FakeLLM 的最终文本回复。"""
         tool_name = message.tool_name or "tool"
         content = message.text_content().strip()
         preview = content[:1200]
@@ -610,7 +620,7 @@ class FakeLLM:
 
     @staticmethod
     def _memory_context(messages: list[ChatMessage]) -> str:
-        """为该流程的公共逻辑提供局部辅助处理。"""
+        """从系统消息中提取已注入的记忆召回上下文。"""
         for message in messages:
             if message.role != "system":
                 continue

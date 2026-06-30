@@ -1,4 +1,4 @@
-"""实现 capabilities/catalog.py 对应的业务边界和辅助逻辑。"""
+"""汇总工具、Skill 和 Extension 的能力目录并提供查询。"""
 from __future__ import annotations
 
 from codemuse.capabilities.descriptor import CapabilityDescriptor, CapabilityKind

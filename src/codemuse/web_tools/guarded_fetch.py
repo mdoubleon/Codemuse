@@ -214,4 +214,5 @@ class _NoRedirectHandler(HTTPRedirectHandler):
     """禁用 urllib 自动重定向，让每一跳都经过 URL 校验。"""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        """处理 redirectrequest。"""
         return None

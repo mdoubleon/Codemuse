@@ -11,12 +11,14 @@ from codemuse.memory.file_memory_vector import FileMemoryVectorIndex
 
 @dataclass(frozen=True)
 class WorkspaceIndexReport:
+    """保存 WorkspaceIndex 报告的结构化数据。"""
     workspace: str
     index_path: str
     file_count: int
     chunk_count: int
 
     def to_dict(self) -> dict[str, Any]:
+        """将 WorkspaceIndexReport 转换为可序列化字典。"""
         return {
             "workspace": self.workspace,
             "index_path": self.index_path,
@@ -53,6 +55,7 @@ def build_workspace_file_index(
 
 
 def load_indexed_chunks(workspace: Path) -> list[FileMemoryChunk]:
+    """加载indexed分块。"""
     index = FileMemoryVectorIndex(workspace.resolve() / ".data" / "codemuse" / "rag" / "vector_index.json")
     index.load()
     return [record.chunk for record in index.records]

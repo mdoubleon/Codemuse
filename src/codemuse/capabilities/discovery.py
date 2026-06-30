@@ -1,4 +1,4 @@
-"""实现 capabilities/discovery.py 对应的业务边界和辅助逻辑。"""
+"""从工具注册表等来源发现可展示的 CodeMuse 能力。"""
 from __future__ import annotations
 
 from dataclasses import dataclass

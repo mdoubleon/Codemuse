@@ -1,4 +1,4 @@
-"""实现 tools/metadata.py 对应的业务边界和辅助逻辑。"""
+"""定义工具展示、审计和能力目录使用的元数据结构。"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ToolMetadata:
-    """ToolMetadata：封装该领域需要传递的数据和行为。"""
+    """保存工具展示、审计和能力目录所需的补充元数据。"""
     name: str
     category: str
     permission_domain: str = "read"

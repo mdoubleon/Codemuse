@@ -1,1 +1,1 @@
-"""实现 tools/legacy_hints_readiness.py 对应的业务边界和辅助逻辑。"""
+"""提供旧版提示和 readiness 检查之间的兼容辅助。"""

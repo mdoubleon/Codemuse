@@ -39,7 +39,7 @@ class SubAgentManager:
         self.llm_factory = llm_factory or (lambda: FakeLLM())
 
     def list_specs(self) -> list[str]:
-        """列出该领域的已保存或已加载数据。"""
+        """列出当前已注册的子 Agent 规格。"""
         return self.catalog.names()
 
     def run_sync(self, *, spec_name: str, task: str, max_turns: int | None = None) -> SubAgentRunResult:
@@ -89,7 +89,7 @@ class SubAgentManager:
         }
 
     def _restricted_registry(self, allowlist: list[str]) -> ToolRegistry:
-        """为该流程的公共逻辑提供局部辅助处理。"""
+        """为子 Agent 构造只包含 allowlist 工具的受限注册表。"""
         child = ToolRegistry(self.workspace)
         for name in allowlist:
             if name == "spawn_subagent":

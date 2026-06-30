@@ -1,4 +1,4 @@
-"""实现 memory/recall_builder.py 对应的业务边界和辅助逻辑。"""
+"""把记忆检索命中整理成可注入模型上下文的召回片段。"""
 from __future__ import annotations
 
 from codemuse.memory.types import MemoryItem

@@ -7,6 +7,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class BaselineCase:
+    """定义 BaselineCase的结构化数据。"""
     id: str
     name: str
     category: str
@@ -15,6 +16,7 @@ class BaselineCase:
 
 @dataclass(frozen=True)
 class BaselineCaseResult:
+    """保存 BaselineCase 结果的结构化数据。"""
     case_id: str
     name: str
     category: str
@@ -27,6 +29,7 @@ class BaselineCaseResult:
 
 @dataclass(frozen=True)
 class BaselineReport:
+    """保存 Baseline 报告的结构化数据。"""
     suite: str
     generated_at: str
     total_cases: int
@@ -42,6 +45,7 @@ class BaselineReport:
 
 @dataclass(frozen=True)
 class BenchmarkHistoryEntry:
+    """定义 BenchmarkHistoryEntry的结构化数据。"""
     run_id: str
     suite: str
     generated_at: str

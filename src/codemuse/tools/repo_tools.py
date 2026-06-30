@@ -185,6 +185,7 @@ class PrepareRepoImportTool(BaseTool):
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 PrepareRepoImportTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name="prepare_repo_import",
             description="Normalize a local or GitHub repository source into a safe import plan without cloning.",
@@ -202,6 +203,7 @@ class PrepareRepoImportTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 PrepareRepoImportTool 的工具逻辑并返回 ToolResult。"""
         plan = build_repo_import_plan(
             str(arguments.get("source") or ""),
             workspace=self.workspace,
@@ -219,6 +221,7 @@ class BuildProjectPlanTool(BaseTool):
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 BuildProjectPlanTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name="build_project_plan",
             description="Analyze a local repository blueprint and turn it into a task-oriented project plan.",
@@ -238,6 +241,7 @@ class BuildProjectPlanTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 BuildProjectPlanTool 的工具逻辑并返回 ToolResult。"""
         root = self.resolve_workspace_path(str(arguments.get("path") or "."))
         blueprint = build_repo_blueprint(
             root,
@@ -257,6 +261,7 @@ class ImportRepositoryTool(BaseTool):
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 ImportRepositoryTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name="import_repository",
             description="Import a local repository into workspace imports and cache metadata. Network clone requires allow_network=true.",
@@ -276,6 +281,7 @@ class ImportRepositoryTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 ImportRepositoryTool 的工具逻辑并返回 ToolResult。"""
         record = import_repository(
             str(arguments.get("source") or ""),
             workspace=self.workspace,
@@ -295,6 +301,7 @@ class RepoGitStatusTool(BaseTool):
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 RepoGitStatusTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name="repo_git_status",
             description="Inspect git branch, commit, status, and optional diff for a local repo path.",
@@ -312,6 +319,7 @@ class RepoGitStatusTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 RepoGitStatusTool 的工具逻辑并返回 ToolResult。"""
         root = self.resolve_workspace_path(str(arguments.get("path") or "."))
         snapshot = inspect_git_status(
             root,
@@ -330,6 +338,7 @@ class RepoCacheListTool(BaseTool):
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 RepoCacheListTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name="list_repo_cache",
             description="List repositories imported into the workspace repo cache.",
@@ -340,6 +349,7 @@ class RepoCacheListTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 RepoCacheListTool 的工具逻辑并返回 ToolResult。"""
         records = list_repo_cache(self.workspace)
         if records:
             content = "\n".join(f"- {item['repo_id']}: {item['imported_path']}" for item in records)

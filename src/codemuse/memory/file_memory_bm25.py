@@ -52,4 +52,5 @@ def lexical_overlap_score(query: str, text: str) -> float:
 
 
 def _chunk_haystack(chunk: FileMemoryChunk) -> str:
+    """处理 分块检索文本。"""
     return " ".join([chunk.title, chunk.path, " ".join(chunk.tags), chunk.text])

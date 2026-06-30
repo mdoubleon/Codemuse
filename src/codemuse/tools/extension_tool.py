@@ -12,11 +12,13 @@ class RunExtensionTool(BaseTool):
     """Execute a safe manifest-driven extension action."""
 
     def __init__(self, workspace: Path, runtime: ExtensionRuntime) -> None:
+        """初始化 RunExtensionTool 并保存运行依赖。"""
         super().__init__(workspace)
         self.runtime = runtime
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 RunExtensionTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name="run_extension",
             description="Run a discovered extension through the safe manifest runtime.",
@@ -34,6 +36,7 @@ class RunExtensionTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 RunExtensionTool 的工具逻辑并返回 ToolResult。"""
         name = str(arguments.get("name") or "").strip()
         if not name:
             raise ValueError("run_extension requires an extension name.")
@@ -53,16 +56,19 @@ class DynamicExtensionTool(BaseTool):
     """A safe manifest-declared extension tool."""
 
     def __init__(self, workspace: Path, runtime: ExtensionRuntime, descriptor: dict[str, object]) -> None:
+        """初始化 DynamicExtensionTool 并保存运行依赖。"""
         super().__init__(workspace)
         self.runtime = runtime
         self.descriptor = descriptor
 
     @property
     def public_name(self) -> str:
+        """处理 公网名称。"""
         return "extension__" + _safe_name(str(self.descriptor["extension"])) + "__" + _safe_name(str(self.descriptor["name"]))
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 DynamicExtensionTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name=self.public_name,
             description=str(self.descriptor.get("description") or self.descriptor["name"]),
@@ -72,6 +78,7 @@ class DynamicExtensionTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 DynamicExtensionTool 的工具逻辑并返回 ToolResult。"""
         input_text = str(arguments.get("input") or arguments.get("text") or arguments)
         result = self.runtime.run_extension(
             name=str(self.descriptor["extension"]),
@@ -89,6 +96,7 @@ def register_extension_tools(registry, workspace: Path, runtime: ExtensionRuntim
 
 
 def _safe_name(value: str) -> str:
+    """生成安全名称。"""
     import re
 
     cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", value.strip())

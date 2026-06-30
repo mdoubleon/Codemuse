@@ -10,7 +10,7 @@ from codemuse.domain.tools import ToolCall
 
 @dataclass
 class QueuedMessage:
-    """QueuedMessage：封装该领域需要传递的数据和行为。"""
+    """表示等待 Web 会话 worker 处理的一条用户消息。"""
     text: str
     delivery: str = "follow_up"
 

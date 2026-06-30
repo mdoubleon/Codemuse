@@ -11,6 +11,7 @@ _GITHUB_HOSTS = {"github.com", "www.github.com"}
 
 
 def build_repo_import_plan(source: str, *, workspace: Path, destination: str = "") -> RepoImportPlan:
+    """构建仓库导入计划。"""
     source = source.strip()
     if not source:
         raise ValueError("repo source cannot be empty")
@@ -53,6 +54,7 @@ def build_repo_import_plan(source: str, *, workspace: Path, destination: str = "
 
 
 def format_repo_import_plan(plan: RepoImportPlan) -> str:
+    """格式化仓库导入计划。"""
     lines = [
         f"# Repo Import Plan: {plan.repo_id}",
         "",
@@ -77,6 +79,7 @@ def format_repo_import_plan(plan: RepoImportPlan) -> str:
 
 
 def _parse_github_source(source: str) -> tuple[str, str, str] | None:
+    """解析github源码。"""
     shorthand = re.fullmatch(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", source)
     if shorthand:
         return shorthand.group(1), _strip_git_suffix(shorthand.group(2)), ""
@@ -100,12 +103,14 @@ def _parse_github_source(source: str) -> tuple[str, str, str] | None:
 
 
 def _destination_path(workspace: Path, destination: str, repo_id: str) -> Path:
+    """处理 目标路径path。"""
     if destination:
         return _resolve_workspace_path(destination, workspace)
     return workspace / ".data" / "codemuse" / "imports" / repo_id
 
 
 def _resolve_workspace_path(raw_path: str, workspace: Path) -> Path:
+    """解析工作区path。"""
     candidate = Path(raw_path)
     if not candidate.is_absolute():
         candidate = workspace / candidate
@@ -116,12 +121,15 @@ def _resolve_workspace_path(raw_path: str, workspace: Path) -> Path:
 
 
 def _repo_id(owner: str, name: str) -> str:
+    """处理 仓库ID。"""
     return f"{_safe_name(owner)}_{_safe_name(name)}"
 
 
 def _safe_name(value: str) -> str:
+    """生成安全名称。"""
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "repo"
 
 
 def _strip_git_suffix(value: str) -> str:
+    """去除Gitsuffix。"""
     return value[:-4] if value.endswith(".git") else value

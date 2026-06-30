@@ -38,7 +38,7 @@ class MCPManager:
         return self._servers[server_name]
 
     def list_mcp_tools(self, server_name: str) -> list[MCPToolDescriptor]:
-        """列出该领域的已保存或已加载数据。"""
+        """发现并返回指定 MCP server 暴露的工具描述。"""
         server = self.server_config(server_name)
         session = self._sessions.get_or_create(server)
         descriptors: list[MCPToolDescriptor] = []

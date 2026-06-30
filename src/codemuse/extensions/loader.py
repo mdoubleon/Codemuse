@@ -9,6 +9,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ExtensionSearchRoot:
+    """定义 ExtensionSearchRoot的结构化数据。"""
     path: Path
     source: str
     precedence: int = 0
@@ -16,6 +17,7 @@ class ExtensionSearchRoot:
 
 @dataclass(frozen=True)
 class ExtensionDescriptor:
+    """描述 Extension 的名称、来源和元数据。"""
     name: str
     description: str
     path: Path
@@ -29,6 +31,7 @@ class ExtensionDescriptor:
 
 
 def extension_search_roots(workspace: Path) -> list[ExtensionSearchRoot]:
+    """处理 扩展搜索roots。"""
     workspace = workspace.resolve()
     return [
         ExtensionSearchRoot(workspace / ".codemuse" / "extensions", source="project_config", precedence=0),
@@ -41,6 +44,7 @@ def load_extensions(
     *,
     search_roots: list[ExtensionSearchRoot] | None = None,
 ) -> dict[str, ExtensionDescriptor]:
+    """加载extensions。"""
     roots = search_roots or extension_search_roots(workspace)
     extensions: dict[str, ExtensionDescriptor] = {}
     for root in sorted(roots, key=lambda item: item.precedence):
@@ -55,6 +59,7 @@ def load_extensions(
 
 
 def _iter_manifest_files(root: Path) -> list[Path]:
+    """遍历清单文件。"""
     direct = [root / "EXTENSION.json", root / "extension.json"]
     for path in direct:
         if path.exists():
@@ -66,6 +71,7 @@ def _iter_manifest_files(root: Path) -> list[Path]:
 
 
 def _parse_extension_descriptor(path: Path, root: ExtensionSearchRoot) -> ExtensionDescriptor:
+    """解析扩展描述符。"""
     extension_dir = path.parent.resolve()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -99,10 +105,12 @@ def _parse_extension_descriptor(path: Path, root: ExtensionSearchRoot) -> Extens
 
 
 def _string(value: Any) -> str:
+    """处理 string。"""
     return value.strip() if isinstance(value, str) else ""
 
 
 def _string_list(value: Any) -> list[str]:
+    """处理 string列表。"""
     if not isinstance(value, list):
         return []
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]

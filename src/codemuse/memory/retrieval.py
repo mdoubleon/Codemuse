@@ -29,6 +29,7 @@ class RetrievalHit:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """将 RetrievalHit 转换为可序列化字典。"""
         return {
             "source": self.source,
             "title": self.title,
@@ -44,11 +45,13 @@ class RetrievalHit:
 
 @dataclass(frozen=True)
 class RetrievalResult:
+    """保存 Retrieval 结果的结构化数据。"""
     query: str
     hits: list[RetrievalHit]
     distribution: dict[str, int]
 
     def to_dict(self) -> dict[str, Any]:
+        """将 RetrievalResult 转换为可序列化字典。"""
         return {
             "query": self.query,
             "hits": [hit.to_dict() for hit in self.hits],
@@ -83,6 +86,7 @@ def retrieve_memory(
 
 
 def format_retrieval_hits(hits: list[RetrievalHit]) -> str:
+    """格式化retrieval命中。"""
     if not hits:
         return "No generic memory matched."
     lines: list[str] = []
@@ -109,6 +113,7 @@ def format_retrieval_hits(hits: list[RetrievalHit]) -> str:
 
 
 def _source_label(source: str) -> str:
+    """处理 源码标签。"""
     labels = {
         "project_memory": "Project Memory",
         "blueprint_memory": "Repository Blueprint Memory",
@@ -119,6 +124,7 @@ def _source_label(source: str) -> str:
 
 
 def _memory_chunks(root: Path) -> list[FileMemoryChunk]:
+    """处理 记忆分块。"""
     chunks: list[FileMemoryChunk] = []
     project_store = FileMemoryStore(root / ".data" / "codemuse" / "project_memory")
     for item in project_store.list():
@@ -159,6 +165,7 @@ def _memory_chunks(root: Path) -> list[FileMemoryChunk]:
 
 
 def _hit_from_chunk(chunk: FileMemoryChunk, score: float, details: dict[str, float | str]) -> RetrievalHit:
+    """处理 命中from分块。"""
     source = str(chunk.metadata.get("source") or "indexed_file")
     return RetrievalHit(
         source=source,

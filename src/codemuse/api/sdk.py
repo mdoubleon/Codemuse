@@ -123,60 +123,60 @@ def rewind(
 
 
 def list_sessions(workspace: Path) -> list[dict[str, Any]]:
-    """列出该领域的已保存或已加载数据。"""
+    """列出 workspace 下保存的所有会话记录。"""
     return [record.to_dict() for record in _session_store(workspace.resolve()).list()]
 
 
 def list_approvals(workspace: Path, *, status: str | None = "pending") -> list[dict[str, Any]]:
-    """列出该领域的已保存或已加载数据。"""
+    """按状态列出 workspace 下的工具审批记录。"""
     return [approval.to_dict() for approval in _approval_store(workspace.resolve()).list(status=status)]
 
 
 def list_checkpoints(workspace: Path, *, session_id: str | None = None) -> list[dict[str, Any]]:
-    """列出该领域的已保存或已加载数据。"""
+    """列出 workspace 下可用于 rewind 的检查点记录。"""
     return [checkpoint.to_dict() for checkpoint in _checkpoint_store(workspace.resolve()).list(session_id=session_id)]
 
 
 def list_timeline(workspace: Path, *, session_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-    """列出该领域的已保存或已加载数据。"""
+    """读取指定会话或 workspace 最近的运行事件。"""
     return _timeline_store(workspace.resolve()).list(session_id=session_id, limit=limit)
 
 
 def list_capabilities(workspace: Path, *, kind: CapabilityKind | None = None) -> list[dict[str, Any]]:
-    """列出该领域的已保存或已加载数据。"""
+    """列出当前 workspace 可展示或可调用的能力清单。"""
     catalog = create_capability_catalog(workspace.resolve())
     return [descriptor.to_dict() for descriptor in catalog.list(kind=kind)]
 
 
 def get_capability(workspace: Path, *, kind: CapabilityKind, name: str) -> dict[str, Any]:
-    """读取该领域的单个对象或有效快照。"""
+    """按能力类型和名称读取单个能力描述。"""
     catalog = create_capability_catalog(workspace.resolve())
     return catalog.get(kind, name).to_dict()
 
 
 def get_config(workspace: Path) -> dict[str, Any]:
-    """读取该领域的单个对象或有效快照。"""
+    """读取 workspace 合并项目配置和运行时覆盖后的配置快照。"""
     return get_config_manager(workspace.resolve()).get_snapshot().to_dict()
 
 
 def list_model_providers() -> list[dict[str, object]]:
-    """列出该领域的已保存或已加载数据。"""
+    """返回 CodeMuse 当前支持的模型 Provider 列表。"""
     return list_llm_providers()
 
 
 def list_provider_readiness(workspace: Path) -> list[dict[str, object]]:
-    """List live-provider readiness for the workspace effective config."""
+    """检查当前 workspace 配置下各模型 Provider 的就绪状态。"""
     config = get_config_manager(workspace.resolve()).get_effective_config().model
     return provider_readiness(config)
 
 
 def refresh_memory(workspace: Path, *, max_files: int = 300) -> dict[str, Any]:
-    """Build or refresh the local memory/RAG index for a workspace."""
+    """为 workspace 构建或刷新本地 memory/RAG 索引。"""
     return refresh_memory_index(workspace.resolve(), max_files=max_files).to_dict()
 
 
 def search_memory(workspace: Path, query: str, *, limit: int = 6) -> dict[str, Any]:
-    """Search project memory, blueprint memory, and indexed workspace files."""
+    """搜索项目记忆、蓝图记忆和已索引的 workspace 文件。"""
     result = search_memory_pipeline(workspace.resolve(), query, limit=limit)
     payload = result.to_dict()
     payload["markdown"] = format_memory_pipeline_search(result)
@@ -198,7 +198,7 @@ def _merge_subscribers(
     subscriber: Subscriber | None,
     subscribers: list[Subscriber] | None,
 ) -> list[Subscriber]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """合并单个订阅回调和订阅回调列表，供 Runtime 统一注册。"""
     merged: list[Subscriber] = []
     if subscriber is not None:
         merged.append(subscriber)
@@ -208,7 +208,7 @@ def _merge_subscribers(
 
 
 def _assistant_preview(runtime: AgentRuntime, limit: int = 500) -> str:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """从会话消息中提取最近一条 assistant 文本预览。"""
     for message in reversed(runtime.state.messages):
         if message.role != "assistant":
             continue
@@ -220,7 +220,7 @@ def _assistant_preview(runtime: AgentRuntime, limit: int = 500) -> str:
 
 
 def _result_payload(runtime: AgentRuntime, events: list[AgentEvent], *, collect_events: bool) -> dict[str, Any]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """把 Runtime 状态和本轮事件整理成 SDK 返回结构。"""
     payload: dict[str, Any] = {
         "session_id": runtime.session_id,
         "assistant": _assistant_preview(runtime),
@@ -233,25 +233,25 @@ def _result_payload(runtime: AgentRuntime, events: list[AgentEvent], *, collect_
 
 
 def _data_root(workspace: Path) -> Path:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """计算 workspace 内 CodeMuse 本地数据根目录。"""
     return workspace.resolve() / ".data" / "codemuse"
 
 
 def _session_store(workspace: Path) -> SessionStore:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """创建指向当前 workspace 的会话存储对象。"""
     return SessionStore(_data_root(workspace) / "sessions")
 
 
 def _approval_store(workspace: Path) -> PendingApprovalStore:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """创建指向当前 workspace 的审批存储对象。"""
     return PendingApprovalStore(_data_root(workspace) / "approvals")
 
 
 def _checkpoint_store(workspace: Path) -> CheckpointStore:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """创建指向当前 workspace 的检查点存储对象。"""
     return CheckpointStore(_data_root(workspace) / "checkpoints")
 
 
 def _timeline_store(workspace: Path) -> TimelineStore:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """创建指向当前 workspace 的 timeline 事件存储对象。"""
     return TimelineStore(_data_root(workspace) / "timeline")

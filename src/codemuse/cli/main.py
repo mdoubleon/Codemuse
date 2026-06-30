@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None, *, default_workspace: Path | None = None
 
 
 def _main_legacy(argv: list[str], *, default_workspace: Path | None) -> int:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """处理旧版无子命令的 CLI 用法。"""
     parser = argparse.ArgumentParser(description="Run CodeMuse with the configured local LLM provider.")
     parser.add_argument("prompt", nargs="?", help="Prompt to send to the agent.")
     parser.add_argument("--workspace", default=str(_default_workspace(default_workspace)), help="Workspace path for coding tools.")
@@ -69,7 +69,7 @@ def _main_legacy(argv: list[str], *, default_workspace: Path | None) -> int:
 
 
 def _main_command(argv: list[str], *, default_workspace: Path | None) -> int:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """构建子命令解析器并分发到对应处理函数。"""
     parser = argparse.ArgumentParser(description="CodeMuse command line interface.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_run_parser(subparsers, default_workspace)
@@ -129,7 +129,7 @@ def _main_command(argv: list[str], *, default_workspace: Path | None) -> int:
 
 
 def _run_action(args: argparse.Namespace, workspace: Path) -> dict[str, Any]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """根据旧版 CLI 参数执行 run/approve/reject/checkpoint/rewind 操作。"""
     if args.approve:
         payload = sdk.approve(workspace, args.approve, session_id=args.session, collect_events=True)
     elif args.reject:
@@ -468,6 +468,7 @@ def _add_models_parser(subparsers: argparse._SubParsersAction, default_workspace
 
 
 def _add_memory_parser(subparsers: argparse._SubParsersAction, default_workspace: Path | None) -> None:
+    """添加记忆parser。"""
     parser = subparsers.add_parser("memory", help="Index and search local memory/RAG context.")
     nested = parser.add_subparsers(dest="memory_command", required=True)
     index_parser = nested.add_parser("index")
@@ -528,7 +529,7 @@ def _add_demo_parser(subparsers: argparse._SubParsersAction, default_workspace: 
 
 
 def _first_command_token(argv: list[str]) -> str | None:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """从 CLI 参数中找到第一个非选项命令词。"""
     skip_next = False
     options_with_values = {"--workspace", "-w", "--session", "--approve", "--reject", "--rewind"}
     for token in argv:
@@ -545,7 +546,7 @@ def _first_command_token(argv: list[str]) -> str | None:
 
 
 def _default_workspace(default_workspace: Path | None) -> Path:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """计算 CLI 默认使用的 workspace 路径。"""
     return (default_workspace or Path.cwd()).resolve()
 
 

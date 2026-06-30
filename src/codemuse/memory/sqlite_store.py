@@ -1,1 +1,1 @@
-"""实现 memory/sqlite_store.py 对应的业务边界和辅助逻辑。"""
+"""预留 SQLite 记忆存储后端的边界。"""

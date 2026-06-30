@@ -20,6 +20,7 @@ def build_report(
     suite: str = "baseline-deterministic",
     duration_seconds: float = 0.0,
 ) -> BaselineReport:
+    """构建报告。"""
     total = len(results)
     passed = sum(1 for item in results if item.passed)
     failed = total - passed
@@ -39,6 +40,7 @@ def build_report(
 
 
 def write_report(report: BaselineReport, output_dir: Path, *, save_history: bool = False) -> tuple[Path, Path]:
+    """写入报告。"""
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "latest.json"
     md_path = output_dir / "latest.md"
@@ -91,6 +93,7 @@ def write_platform_artifacts(output_dir: Path) -> dict[str, Path]:
 
 
 def render_markdown(report: BaselineReport) -> str:
+    """渲染Markdown。"""
     lines = [
         "# CodeMuse Baseline Eval Report",
         "",
@@ -153,6 +156,7 @@ def render_markdown(report: BaselineReport) -> str:
 
 
 def render_history_markdown(entries: list[BenchmarkHistoryEntry]) -> str:
+    """渲染历史Markdown。"""
     lines = [
         "# CodeMuse Benchmark History",
         "",
@@ -170,6 +174,7 @@ def render_history_markdown(entries: list[BenchmarkHistoryEntry]) -> str:
 
 
 def render_trend_svg(entries: list[BenchmarkHistoryEntry]) -> str:
+    """渲染趋势SVG。"""
     width = 720
     height = 260
     pad = 36
@@ -210,6 +215,7 @@ def render_trend_svg(entries: list[BenchmarkHistoryEntry]) -> str:
 
 
 def _category_summary(results: list[BaselineCaseResult]) -> dict[str, dict[str, float | int]]:
+    """处理 categorysummary。"""
     grouped: dict[str, list[BaselineCaseResult]] = {}
     for item in results:
         grouped.setdefault(item.category, []).append(item)
@@ -228,6 +234,7 @@ def _category_summary(results: list[BaselineCaseResult]) -> dict[str, dict[str, 
 
 
 def load_history_entries(output_dir: Path) -> list[BenchmarkHistoryEntry]:
+    """加载历史entries。"""
     history_dir = output_dir / "history"
     entries: list[BenchmarkHistoryEntry] = []
     if history_dir.exists():
@@ -238,6 +245,7 @@ def load_history_entries(output_dir: Path) -> list[BenchmarkHistoryEntry]:
 
 
 def _history_entry(report: BaselineReport, json_path: Path, md_path: Path) -> BenchmarkHistoryEntry:
+    """处理 历史条目。"""
     average = report.duration_seconds / report.total_cases if report.total_cases else 0.0
     return BenchmarkHistoryEntry(
         run_id=_run_id(report),
@@ -257,6 +265,7 @@ def _history_entry(report: BaselineReport, json_path: Path, md_path: Path) -> Be
 
 
 def _load_report(path: Path) -> BaselineReport:
+    """加载报告。"""
     payload = json.loads(path.read_text(encoding="utf-8"))
     results = [
         BaselineCaseResult(
@@ -287,12 +296,14 @@ def _load_report(path: Path) -> BaselineReport:
 
 
 def _run_id(report: BaselineReport) -> str:
+    """运行ID。"""
     clean = report.generated_at.replace(":", "").replace("-", "").replace("+", "z")
     clean = clean.replace(".", "-")
     return f"{report.suite}-{clean}"
 
 
 def _proxy_metrics(results: list[BaselineCaseResult], *, duration_seconds: float) -> dict[str, float | int | str]:
+    """处理 proxy指标。"""
     event_count = 0
     tool_count = 0
     for result in results:
@@ -319,6 +330,7 @@ def _proxy_metrics(results: list[BaselineCaseResult], *, duration_seconds: float
 
 
 def _failure_summary(results: list[BaselineCaseResult]) -> dict[str, dict[str, int]]:
+    """处理 失败summary。"""
     summary: dict[str, dict[str, int]] = {}
     for result in results:
         for failure in result.failures:
@@ -331,6 +343,7 @@ def _failure_summary(results: list[BaselineCaseResult]) -> dict[str, dict[str, i
 
 
 def _classify_failure(message: str) -> str:
+    """处理 classify失败。"""
     lowered = message.lower()
     if "approval" in lowered or "stale" in lowered or "reject" in lowered:
         return "approval"
@@ -348,6 +361,7 @@ def _classify_failure(message: str) -> str:
 
 
 def _trend_payload(entries: list[BenchmarkHistoryEntry]) -> dict[str, object]:
+    """处理 趋势载荷。"""
     if not entries:
         return {"runs": [], "delta": {}}
     first = entries[0]
@@ -365,6 +379,7 @@ def _trend_payload(entries: list[BenchmarkHistoryEntry]) -> dict[str, object]:
 
 
 def _failure_taxonomy_from_history(output_dir: Path) -> dict[str, object]:
+    """处理 失败分类from历史。"""
     latest_path = output_dir / "latest.json"
     reports = []
     if latest_path.exists():

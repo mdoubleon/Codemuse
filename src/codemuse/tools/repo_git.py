@@ -17,6 +17,7 @@ IGNORED_COPY_DIRS = {".git", ".data", "__pycache__", ".venv", "venv", "node_modu
 
 @dataclass(frozen=True)
 class RepoGitSnapshot:
+    """定义 RepoGitSnapshot的结构化数据。"""
     path: str
     is_git_repo: bool
     branch: str = ""
@@ -26,6 +27,7 @@ class RepoGitSnapshot:
     diff: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """将 RepoGitSnapshot 转换为可序列化字典。"""
         return {
             "path": self.path,
             "is_git_repo": self.is_git_repo,
@@ -105,6 +107,7 @@ def import_repository(
 
 
 def list_repo_cache(workspace: Path) -> list[dict[str, Any]]:
+    """列出仓库缓存。"""
     path = _cache_index_path(workspace.resolve())
     if not path.exists():
         return []
@@ -116,6 +119,7 @@ def list_repo_cache(workspace: Path) -> list[dict[str, Any]]:
 
 
 def format_git_snapshot(snapshot: RepoGitSnapshot) -> str:
+    """格式化Git快照。"""
     lines = [f"# Git Status: {snapshot.path}", "", f"- is_git_repo: {snapshot.is_git_repo}"]
     if snapshot.branch:
         lines.append(f"- branch: {snapshot.branch}")
@@ -138,6 +142,7 @@ def format_git_snapshot(snapshot: RepoGitSnapshot) -> str:
 
 
 def format_import_record(record: dict[str, Any]) -> str:
+    """格式化导入记录。"""
     lines = [
         f"# Imported Repository: {record['repo_id']}",
         "",
@@ -154,6 +159,7 @@ def format_import_record(record: dict[str, Any]) -> str:
 
 
 def _clone_repository(clone_url: str, target: Path, *, branch: str, allow_network: bool) -> None:
+    """处理 clonerepository。"""
     if not allow_network:
         raise PermissionError("Network clone requires allow_network=true.")
     command = ["git", "clone", "--depth", "1"]
@@ -166,6 +172,7 @@ def _clone_repository(clone_url: str, target: Path, *, branch: str, allow_networ
 
 
 def _git_text(root: Path, *args: str) -> str:
+    """处理 Git文本。"""
     result = _git(root, *args)
     if result.returncode != 0:
         return ""
@@ -173,10 +180,12 @@ def _git_text(root: Path, *args: str) -> str:
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """处理 Git。"""
     return subprocess.run(["git", "-C", str(root), *args], text=True, capture_output=True, timeout=10, check=False)
 
 
 def _import_destination(workspace: Path, destination: str, repo_id: str) -> Path:
+    """处理 导入目标路径。"""
     target = Path(destination) if destination else Path("imports") / repo_id
     if not target.is_absolute():
         target = workspace / target
@@ -187,14 +196,17 @@ def _import_destination(workspace: Path, destination: str, repo_id: str) -> Path
 
 
 def _copy_ignore(directory: str, names: list[str]) -> set[str]:
+    """处理 copyignore。"""
     return {name for name in names if name in IGNORED_COPY_DIRS}
 
 
 def _cache_index_path(workspace: Path) -> Path:
+    """处理 缓存索引path。"""
     return workspace / ".data" / "codemuse" / "repo_cache" / "imports.json"
 
 
 def _write_cache_record(workspace: Path, record: dict[str, Any]) -> None:
+    """写入缓存记录。"""
     path = _cache_index_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = list_repo_cache(workspace)

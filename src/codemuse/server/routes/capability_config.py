@@ -1,1 +1,1 @@
-"""实现 server/routes/capability_config.py 对应的业务边界和辅助逻辑。"""
+"""实现 HTTP 能力开关配置接口的辅助逻辑。"""

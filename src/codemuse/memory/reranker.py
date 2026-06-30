@@ -50,6 +50,7 @@ def rerank_chunks(
 
 
 def summarize_hit_distribution(hits: list[tuple[FileMemoryChunk, float, dict[str, float | str]]]) -> dict[str, int]:
+    """汇总命中分布。"""
     distribution: dict[str, int] = defaultdict(int)
     for chunk, _score, _details in hits:
         distribution[chunk.metadata.get("source", "unknown")] += 1
@@ -57,6 +58,7 @@ def summarize_hit_distribution(hits: list[tuple[FileMemoryChunk, float, dict[str
 
 
 def _path_bonus(query_terms: set[str], chunk: FileMemoryChunk) -> float:
+    """处理 path加分。"""
     if not query_terms:
         return 0.0
     haystack = " ".join([chunk.path, chunk.title, " ".join(chunk.tags)]).lower()

@@ -134,6 +134,7 @@ def render_markdown(report: ReleaseReadinessReport) -> str:
 
 
 def _environment_checks() -> list[ReadinessCheck]:
+    """处理 environmentchecks。"""
     version = sys.version_info
     ok = version >= (3, 10)
     return [
@@ -148,6 +149,7 @@ def _environment_checks() -> list[ReadinessCheck]:
 
 
 def _project_file_checks(root: Path) -> list[ReadinessCheck]:
+    """处理 项目文件checks。"""
     required_files = [
         "README.md",
         "PROJECT_GUIDE.md",
@@ -183,6 +185,7 @@ def _project_file_checks(root: Path) -> list[ReadinessCheck]:
 
 
 def _module_file_checks(root: Path) -> list[ReadinessCheck]:
+    """处理 module文件checks。"""
     module_files = [
         "src/codemuse/runtime/runtime.py",
         "src/codemuse/tools/registry.py",
@@ -213,6 +216,7 @@ def _module_file_checks(root: Path) -> list[ReadinessCheck]:
 
 
 def _capability_checks(root: Path) -> list[ReadinessCheck]:
+    """处理 能力checks。"""
     try:
         capabilities = sdk.list_capabilities(root)
     except Exception as exc:  # pragma: no cover - defensive doctor path
@@ -274,6 +278,7 @@ def _capability_checks(root: Path) -> list[ReadinessCheck]:
 
 
 def _model_provider_checks(root: Path) -> list[ReadinessCheck]:
+    """处理 模型Providerchecks。"""
     providers = sdk.list_provider_readiness(root)
     fake = next((item for item in providers if item["name"] == "fake"), None)
     live_not_implemented = [str(item["name"]) for item in providers if item["name"] != "fake" and not item["implemented"]]
@@ -310,6 +315,7 @@ def _model_provider_checks(root: Path) -> list[ReadinessCheck]:
 
 
 def _memory_pipeline_check(root: Path) -> ReadinessCheck:
+    """处理 记忆流程check。"""
     try:
         with tempfile.TemporaryDirectory(prefix="codemuse_doctor_memory_") as raw:
             sample = Path(raw)
@@ -336,6 +342,7 @@ def _memory_pipeline_check(root: Path) -> ReadinessCheck:
 
 
 def _compile_check(root: Path, *, run_compile: bool) -> ReadinessCheck:
+    """处理 compilecheck。"""
     if not run_compile:
         return ReadinessCheck(
             id="quality.compileall",
@@ -357,6 +364,7 @@ def _compile_check(root: Path, *, run_compile: bool) -> ReadinessCheck:
 
 
 def _unittest_check(root: Path, *, run_tests: bool) -> ReadinessCheck:
+    """处理 unittestcheck。"""
     if not run_tests:
         return ReadinessCheck(
             id="quality.unittest",
@@ -376,6 +384,7 @@ def _unittest_check(root: Path, *, run_tests: bool) -> ReadinessCheck:
 
 
 def _web_smoke_check(root: Path, *, web_smoke: bool) -> ReadinessCheck:
+    """处理 Websmokecheck。"""
     if not web_smoke:
         return ReadinessCheck(
             id="web.api_smoke",
@@ -438,6 +447,7 @@ def _web_smoke_check(root: Path, *, web_smoke: bool) -> ReadinessCheck:
 
 
 def _demo_smoke_check(*, demo_smoke: bool) -> ReadinessCheck:
+    """处理 演示smokecheck。"""
     if not demo_smoke:
         return ReadinessCheck(
             id="demo.packaged",
@@ -462,6 +472,7 @@ def _demo_smoke_check(*, demo_smoke: bool) -> ReadinessCheck:
 
 
 def _eval_report_check(root: Path, *, run_eval: bool, eval_output: Path | None) -> ReadinessCheck:
+    """处理 eval报告check。"""
     output = (eval_output or (root / "evals" / "reports")).resolve()
     if run_eval:
         try:
@@ -515,6 +526,7 @@ def _eval_report_check(root: Path, *, run_eval: bool, eval_output: Path | None) 
 
 
 def _benchmark_platform_check(root: Path, *, eval_output: Path | None) -> ReadinessCheck:
+    """处理 benchmarkplatformcheck。"""
     output = (eval_output or (root / "evals" / "reports")).resolve()
     latest = output / "latest.json"
     required = [
@@ -560,10 +572,12 @@ def _benchmark_platform_check(root: Path, *, eval_output: Path | None) -> Readin
 
 
 def _format_pairs(items: list[tuple[str, str]]) -> str:
+    """格式化pairs。"""
     return ", ".join(f"{kind}:{name}" for kind, name in items)
 
 
 def _run_subprocess(root: Path, command: list[str]) -> dict[str, Any]:
+    """运行subprocess。"""
     started = time.perf_counter()
     env = dict(os.environ)
     src_path = str(root / "src")
@@ -589,6 +603,7 @@ def _run_subprocess(root: Path, command: list[str]) -> dict[str, Any]:
 
 
 def _tail(text: str, *, limit: int = 2000) -> str:
+    """处理 tail。"""
     clean = text.strip()
     if len(clean) <= limit:
         return clean
@@ -596,12 +611,14 @@ def _tail(text: str, *, limit: int = 2000) -> str:
 
 
 def _write_sample_repo(root: Path) -> None:
+    """写入sample仓库。"""
     (root / "README.md").write_text("# Sample Agent\n\nA tiny project.\n", encoding="utf-8")
     (root / "src").mkdir()
     (root / "src" / "main.py").write_text("print('hello')\n", encoding="utf-8")
 
 
 def _http_json(url: str, *, method: str = "GET", payload: dict[str, object] | None = None) -> dict[str, object]:
+    """处理 HTTPJSON。"""
     data = None
     headers = {}
     if payload is not None:
@@ -616,11 +633,13 @@ def _http_json(url: str, *, method: str = "GET", payload: dict[str, object] | No
 
 
 def _http_text(url: str) -> str:
+    """处理 HTTP文本。"""
     with urllib.request.urlopen(url, timeout=3) as response:
         return response.read().decode("utf-8")
 
 
 def _wait_for_session_event(handle, event_type: str, *, timeout: float = 3.0) -> dict[str, object]:
+    """等待for会话事件。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         events = handle.events_after(0)["events"]

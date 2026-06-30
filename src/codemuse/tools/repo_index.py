@@ -169,7 +169,7 @@ def _append_section(lines: list[str], title: str, values: list[str]) -> None:
 
 
 def _ignored(path: Path, root: Path) -> bool:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """判断仓库索引时是否应该跳过该路径。"""
     try:
         rel_parts = path.relative_to(root).parts
     except ValueError:
@@ -178,12 +178,12 @@ def _ignored(path: Path, root: Path) -> bool:
 
 
 def _rel(path: Path, root: Path) -> str:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """把绝对路径转换成仓库根目录相对的 POSIX 路径。"""
     return path.relative_to(root).as_posix()
 
 
 def _is_important_file(path: Path, rel_lower: str) -> bool:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """判断文件是否属于仓库索引的重要文件。"""
     name = path.name.lower()
     if name.startswith("readme") or name in PACKAGE_FILE_NAMES or name in CONFIG_FILE_NAMES or name in ENTRYPOINT_NAMES:
         return True
@@ -193,7 +193,7 @@ def _is_important_file(path: Path, rel_lower: str) -> bool:
 
 
 def _tree_summary(root: Path, *, max_depth: int) -> str:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """生成限制深度和行数的仓库目录树摘要。"""
     lines: list[str] = []
     base_depth = len(root.parts)
     for path in sorted(root.rglob("*")):
@@ -212,5 +212,5 @@ def _tree_summary(root: Path, *, max_depth: int) -> str:
 
 
 def _repo_id_from_path(root: Path) -> str:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """根据仓库目录名生成稳定且安全的 repo_id。"""
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", root.name).strip("_") or "repo"

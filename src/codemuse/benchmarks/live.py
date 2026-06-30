@@ -15,6 +15,7 @@ from codemuse.llm.registry import PROVIDERS, create_llm_provider, provider_readi
 
 @dataclass(frozen=True)
 class ProviderComparisonResult:
+    """保存 ProviderComparison 结果的结构化数据。"""
     provider: str
     model: str
     implemented: bool
@@ -29,6 +30,7 @@ class ProviderComparisonResult:
 
 @dataclass(frozen=True)
 class ProviderComparisonReport:
+    """保存 ProviderComparison 报告的结构化数据。"""
     generated_at: str
     prompt: str
     probed: bool
@@ -92,6 +94,7 @@ def write_provider_comparison(report: ProviderComparisonReport, output_dir: Path
 
 
 def render_provider_comparison_markdown(report: ProviderComparisonReport) -> str:
+    """渲染Provider对比Markdown。"""
     lines = [
         "# CodeMuse Provider Comparison",
         "",
@@ -114,6 +117,7 @@ def render_provider_comparison_markdown(report: ProviderComparisonReport) -> str
 
 
 def _result_from_readiness(info: dict[str, object], *, status: str) -> ProviderComparisonResult:
+    """处理 结果from就绪状态。"""
     return ProviderComparisonResult(
         provider=str(info["name"]),
         model=str(info.get("model") or ""),
@@ -126,6 +130,7 @@ def _result_from_readiness(info: dict[str, object], *, status: str) -> ProviderC
 
 
 def _probe_provider(provider: str, model: str, prompt: str) -> ProviderComparisonResult:
+    """探测Provider。"""
     descriptor = PROVIDERS[provider]
     config = ModelConfig(
         provider=provider,

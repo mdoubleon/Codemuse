@@ -1,4 +1,4 @@
-"""实现 capabilities/descriptor.py 对应的业务边界和辅助逻辑。"""
+"""定义 UI、CLI 展示用的能力描述数据结构。"""
 from __future__ import annotations
 
 import json

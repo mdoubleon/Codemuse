@@ -1,4 +1,4 @@
-"""Project memory tools backed by the local hybrid retrieval pipeline."""
+"""把项目记忆保存和混合检索能力注册为 Agent 工具。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,10 +10,11 @@ from codemuse.tools.base import BaseTool, ToolResult, ToolSpec
 
 
 class SaveProjectMemoryTool(BaseTool):
-    """Save a reusable project or learning memory note."""
+    """保存可在后续轮次复用的项目或学习记忆。"""
 
     @property
     def spec(self) -> ToolSpec:
+        """返回保存项目记忆工具的 ToolSpec 声明。"""
         return ToolSpec(
             name="save_project_memory",
             description="Save a reusable project or learning memory note for future turns.",
@@ -34,6 +35,7 @@ class SaveProjectMemoryTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """把模型传入的记忆内容写入本地项目记忆存储。"""
         store = FileMemoryStore(self.workspace / ".data" / "codemuse" / "project_memory")
         item = store.add(
             title=str(arguments.get("title") or "Untitled memory"),
@@ -56,10 +58,11 @@ class SaveProjectMemoryTool(BaseTool):
 
 
 class SearchProjectMemoryTool(BaseTool):
-    """Search project memory, blueprint memory, and indexed workspace files."""
+    """检索项目记忆、蓝图记忆和已索引的 workspace 文件。"""
 
     @property
     def spec(self) -> ToolSpec:
+        """返回搜索项目记忆工具的 ToolSpec 声明。"""
         return ToolSpec(
             name="search_project_memory",
             description="Search saved project memory, blueprint memory, and indexed workspace files.",
@@ -78,6 +81,7 @@ class SearchProjectMemoryTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """按查询词执行混合记忆检索并返回格式化结果。"""
         query = str(arguments.get("query") or "")
         limit = int(arguments.get("limit") or 5)
         index_report = refresh_memory_index(self.workspace) if bool(arguments.get("refresh_index")) else None
@@ -94,5 +98,6 @@ class SearchProjectMemoryTool(BaseTool):
 
 
 def register_file_memory_tools(registry, workspace: Path) -> None:
+    """把项目记忆保存和搜索工具注册到 ToolRegistry。"""
     registry.register(SaveProjectMemoryTool(workspace))
     registry.register(SearchProjectMemoryTool(workspace))

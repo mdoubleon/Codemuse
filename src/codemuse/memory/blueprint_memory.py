@@ -19,13 +19,13 @@ class BlueprintStore:
         self.memories_dir.mkdir(parents=True, exist_ok=True)
 
     def save_blueprint(self, blueprint: RepoBlueprint) -> Path:
-        """将该领域对象持久化到本地存储。"""
+        """把 RepoBlueprint 写入本地蓝图 JSON 文件。"""
         path = self.blueprints_dir / f"{blueprint.blueprint_id}.json"
         path.write_text(json.dumps(blueprint.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
     def save_memory_items(self, items: list[BlueprintMemoryItem]) -> list[Path]:
-        """将该领域对象持久化到本地存储。"""
+        """把蓝图拆分后的记忆条目逐条写入本地 JSON 文件。"""
         paths: list[Path] = []
         for item in items:
             path = self.memories_dir / f"{item.memory_id}.json"
@@ -34,7 +34,7 @@ class BlueprintStore:
         return paths
 
     def list_blueprints(self) -> list[RepoBlueprint]:
-        """列出该领域的已保存或已加载数据。"""
+        """读取并按时间倒序返回已保存的仓库蓝图。"""
         blueprints: list[RepoBlueprint] = []
         for path in sorted(self.blueprints_dir.glob("*.json")):
             try:
@@ -55,7 +55,7 @@ class BlueprintStore:
         return [item for _, item in matches[:limit]]
 
     def _load_memory_items(self) -> list[BlueprintMemoryItem]:
-        """从本地文件或缓存中加载数据。"""
+        """加载本地保存的所有蓝图记忆条目。"""
         items: list[BlueprintMemoryItem] = []
         for path in sorted(self.memories_dir.glob("*.json")):
             try:
@@ -86,7 +86,7 @@ def format_memory_search_results(items: list[BlueprintMemoryItem]) -> str:
 
 
 def _score(item: BlueprintMemoryItem, query_terms: list[str]) -> int:
-    """计算搜索或排序时使用的简单相关性分数。"""
+    """按查询词在蓝图记忆中的命中情况计算排序分数。"""
     haystack = " ".join(
         [
             item.title,

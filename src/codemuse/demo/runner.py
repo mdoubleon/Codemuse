@@ -116,6 +116,7 @@ def render_markdown(report: DemoReport) -> str:
 
 
 def _demo_steps() -> list[tuple[str, str, StepHandler]]:
+    """处理 演示步骤。"""
     return [
         ("workspace_read", "Read a local workspace", _step_workspace_read),
         ("github_import_plan", "Parse a GitHub import plan safely", _step_github_import_plan),
@@ -126,6 +127,7 @@ def _demo_steps() -> list[tuple[str, str, StepHandler]]:
 
 
 def _step_workspace_read(workspace: Path) -> dict[str, Any]:
+    """处理 step工作区读取。"""
     payload = sdk.run("list files", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "list_files")
     _assert("README.md" in payload["assistant"], "list_files did not include README.md")
@@ -133,6 +135,7 @@ def _step_workspace_read(workspace: Path) -> dict[str, Any]:
 
 
 def _step_github_import_plan(workspace: Path) -> dict[str, Any]:
+    """处理 stepgithub导入计划。"""
     payload = sdk.run("github import https://github.com/openai/codex/tree/main", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "prepare_repo_import")
     plan = event["details"]["import_plan"]
@@ -142,6 +145,7 @@ def _step_github_import_plan(workspace: Path) -> dict[str, Any]:
 
 
 def _step_project_plan(workspace: Path) -> dict[str, Any]:
+    """处理 step项目计划。"""
     payload = sdk.run("project plan goal: add release readiness docs", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "build_project_plan")
     plan = event["details"]["plan"]
@@ -150,6 +154,7 @@ def _step_project_plan(workspace: Path) -> dict[str, Any]:
 
 
 def _step_approval_write(workspace: Path) -> dict[str, Any]:
+    """处理 step审批写入。"""
     target = workspace / "notes" / "demo.txt"
     payload = sdk.run("write file notes/demo.txt content: hello from CodeMuse demo", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "write_file")
@@ -161,6 +166,7 @@ def _step_approval_write(workspace: Path) -> dict[str, Any]:
 
 
 def _step_checkpoint_rewind(workspace: Path) -> dict[str, Any]:
+    """处理 step检查点回退。"""
     target = workspace / "README.md"
     checkpoint = sdk.create_checkpoint(workspace, label="demo checkpoint", collect_events=True)
     checkpoint_id = str(_single_event(checkpoint, "checkpoint_created", None)["details"]["checkpoint_id"])
@@ -173,12 +179,14 @@ def _step_checkpoint_rewind(workspace: Path) -> dict[str, Any]:
 
 
 def _write_sample_repo(root: Path) -> None:
+    """写入sample仓库。"""
     (root / "README.md").write_text("# Sample Agent\n\nA tiny project for the CodeMuse demo.\n", encoding="utf-8")
     (root / "src").mkdir()
     (root / "src" / "main.py").write_text("print('hello')\n", encoding="utf-8")
 
 
 def _single_event(payload: dict[str, Any], event_type: str, tool_name: str | None) -> dict[str, Any]:
+    """提取单个事件。"""
     matches = [
         event
         for event in payload.get("events", [])
@@ -191,6 +199,7 @@ def _single_event(payload: dict[str, Any], event_type: str, tool_name: str | Non
 
 
 def _assert_event(payload: dict[str, Any], event_type: str, tool_name: str | None) -> None:
+    """断言事件。"""
     for event in payload.get("events", []):
         if not isinstance(event, dict):
             continue
@@ -200,6 +209,7 @@ def _assert_event(payload: dict[str, Any], event_type: str, tool_name: str | Non
 
 
 def _assert(condition: bool, message: str) -> None:
+    """断言演示流程。"""
     if not condition:
         raise AssertionError(message)
 

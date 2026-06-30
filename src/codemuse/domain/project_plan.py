@@ -8,6 +8,7 @@ from typing import Any
 
 @dataclass
 class ProjectPlanTask:
+    """定义 ProjectPlanTask的结构化数据。"""
     task_id: str
     title: str
     phase: str
@@ -17,6 +18,7 @@ class ProjectPlanTask:
     acceptance: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """将 ProjectPlanTask 转换为可序列化字典。"""
         return {
             "task_id": self.task_id,
             "title": self.title,
@@ -29,6 +31,7 @@ class ProjectPlanTask:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ProjectPlanTask":
+        """从字典数据恢复 ProjectPlanTask。"""
         return cls(
             task_id=str(data["task_id"]),
             title=str(data["title"]),
@@ -42,6 +45,7 @@ class ProjectPlanTask:
 
 @dataclass
 class ProjectPlan:
+    """定义 ProjectPlan的结构化数据。"""
     plan_id: str
     goal: str
     blueprint_id: str
@@ -54,6 +58,7 @@ class ProjectPlan:
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
+        """将 ProjectPlan 转换为可序列化字典。"""
         return {
             "plan_id": self.plan_id,
             "goal": self.goal,
@@ -69,6 +74,7 @@ class ProjectPlan:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ProjectPlan":
+        """从字典数据恢复 ProjectPlan。"""
         return cls(
             plan_id=str(data["plan_id"]),
             goal=str(data["goal"]),

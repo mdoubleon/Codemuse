@@ -1,4 +1,4 @@
-"""实现 mcp/descriptors.py 对应的业务边界和辅助逻辑。"""
+"""定义 MCP 服务、工具和传输描述的数据结构。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

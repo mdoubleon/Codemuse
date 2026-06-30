@@ -23,7 +23,7 @@ class SubAgentCatalog:
         self._specs[spec.name] = spec
 
     def get(self, name: str) -> SubAgentSpec:
-        """按该领域的名称或 id 读取目标对象。"""
+        """按名称读取子 Agent 规格。"""
         if name not in self._specs:
             raise ValueError(f"Unknown subagent: {name}")
         return self._specs[name]

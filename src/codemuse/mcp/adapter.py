@@ -64,7 +64,7 @@ class MCPToolAdapter(BaseTool):
         )
 
     def _permission_domain(self) -> str:
-        """为该流程的公共逻辑提供局部辅助处理。"""
+        """根据 MCP 工具描述推断 CodeMuse 使用的权限域。"""
         if self.descriptor.is_destructive:
             return "write"
         if self.descriptor.is_remote:
@@ -75,14 +75,16 @@ class MCPToolAdapter(BaseTool):
 
 
 class MCPStatusTool(BaseTool):
-    """Expose MCP lifecycle and discovery state for diagnostics and UI."""
+    """把 MCP 生命周期和工具发现状态暴露给诊断和 UI。"""
 
     def __init__(self, workspace: Path, manager: MCPManager) -> None:
+        """初始化 MCP 状态工具并保存 MCP 管理器。"""
         super().__init__(workspace)
         self.manager = manager
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 MCP 状态工具暴露给模型的 ToolSpec。"""
         return ToolSpec(
             name="mcp_status",
             description="Report configured MCP servers, transport state, auth requirements, discovered tools, and errors.",
@@ -93,6 +95,7 @@ class MCPStatusTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """读取 MCP 状态报告并转换成 ToolResult。"""
         report = self.manager.status_report()
         lines = [
             "# MCP Status",
@@ -146,7 +149,7 @@ def register_mcp_tools(registry: ToolRegistry, workspace: Path, manager: MCPMana
 
 
 def public_mcp_tool_name(prefix: str, server_name: str, tool_name: str) -> str:
-    """把 MCP server 名和原始工具名组合成模型可调用的公共工具名。"""
+    """把 MCP server 和 tool 名称转换成 CodeMuse 公开工具名。"""
     return "__".join([_safe_name(prefix), _safe_name(server_name), _safe_name(tool_name)])
 
 

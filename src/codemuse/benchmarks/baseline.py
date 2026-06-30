@@ -22,6 +22,7 @@ CaseHandler = Callable[[Path], dict[str, object]]
 
 
 def default_cases() -> list[BaselineCase]:
+    """构造默认用例。"""
     return [
         BaselineCase("file_list", "List workspace files", "tools", "FakeLLM selects list_files."),
         BaselineCase("read_file", "Read README", "tools", "FakeLLM selects read_file."),
@@ -101,6 +102,7 @@ def run_baseline(
     save_report: bool = True,
     save_history: bool = False,
 ) -> BaselineReport:
+    """运行基线评测。"""
     requested = set(case_ids or [])
     cases = [case for case in default_cases() if not requested or case.id in requested]
     unknown = sorted(requested - {case.id for case in default_cases()})
@@ -144,6 +146,7 @@ def run_baseline(
 
 
 def run_cli(argv: list[str] | None = None) -> int:
+    """运行cli。"""
     parser = argparse.ArgumentParser(description="Run CodeMuse deterministic baseline evals.")
     parser.add_argument("--output", default=str(Path("evals") / "reports"))
     parser.add_argument("--cases", default="", help="Comma-separated case ids. Empty runs all cases.")
@@ -162,6 +165,7 @@ def run_cli(argv: list[str] | None = None) -> int:
 
 
 def _handler_for_case(case_id: str) -> CaseHandler:
+    """处理 handlerfor用例。"""
     handlers: dict[str, CaseHandler] = {
         "file_list": _case_file_list,
         "read_file": _case_read_file,
@@ -236,6 +240,7 @@ def _handler_for_case(case_id: str) -> CaseHandler:
 
 
 def _case_file_list(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：文件列表。"""
     payload = sdk.run("list files", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "list_files")
     _assert("README.md" in payload["assistant"], "assistant did not include README.md")
@@ -243,6 +248,7 @@ def _case_file_list(workspace: Path) -> dict[str, object]:
 
 
 def _case_read_file(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：读取文件。"""
     payload = sdk.run("read README.md", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "read_file")
     _assert("Sample Agent" in payload["assistant"], "assistant did not include README content")
@@ -250,6 +256,7 @@ def _case_read_file(workspace: Path) -> dict[str, object]:
 
 
 def _case_search_text_match(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：搜索文本match。"""
     payload = sdk.run("search ToolRegistry", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "search_text")
     _assert("guide.md" in payload["assistant"] and "ToolRegistry" in payload["assistant"], "search did not include docs guide match")
@@ -257,6 +264,7 @@ def _case_search_text_match(workspace: Path) -> dict[str, object]:
 
 
 def _case_search_text_no_match(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：搜索文本nomatch。"""
     payload = sdk.run("search no-such-deterministic-token", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "search_text")
     _assert("No matches" in payload["assistant"], "search did not report no matches")
@@ -264,6 +272,7 @@ def _case_search_text_no_match(workspace: Path) -> dict[str, object]:
 
 
 def _case_read_source_file(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：读取源码文件。"""
     payload = sdk.run("read src/main.py", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "read_file")
     _assert("hello" in payload["assistant"], "assistant did not include source content")
@@ -271,6 +280,7 @@ def _case_read_source_file(workspace: Path) -> dict[str, object]:
 
 
 def _case_read_docs_file(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：读取文档文件。"""
     payload = sdk.run("read docs/guide.md", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "read_file")
     _assert("ToolRegistry" in payload["assistant"], "assistant did not include docs content")
@@ -278,6 +288,7 @@ def _case_read_docs_file(workspace: Path) -> dict[str, object]:
 
 
 def _case_list_ignored_data(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：列表忽略目录数据。"""
     (workspace / ".data" / "secret").mkdir(parents=True)
     (workspace / ".data" / "secret" / "hidden.txt").write_text("hidden", encoding="utf-8")
     payload = sdk.run("list files", workspace, collect_events=True)
@@ -287,6 +298,7 @@ def _case_list_ignored_data(workspace: Path) -> dict[str, object]:
 
 
 def _case_list_nested_depth(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：列表嵌套深度。"""
     payload = sdk.run("list files", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "list_files")
     _assert("docs/" in payload["assistant"], "list_files missed docs directory")
@@ -295,6 +307,7 @@ def _case_list_nested_depth(workspace: Path) -> dict[str, object]:
 
 
 def _case_write_approval(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：写入审批。"""
     target = workspace / "notes" / "eval.txt"
     payload = sdk.run("write file notes/eval.txt content: eval baseline", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "write_file")
@@ -307,6 +320,7 @@ def _case_write_approval(workspace: Path) -> dict[str, object]:
 
 
 def _case_write_reject(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：写入拒绝。"""
     target = workspace / "notes" / "reject.txt"
     payload = sdk.run("write file notes/reject.txt content: reject me", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "write_file")
@@ -317,6 +331,7 @@ def _case_write_reject(workspace: Path) -> dict[str, object]:
 
 
 def _case_write_nested_approval(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：写入嵌套审批。"""
     target = workspace / "notes" / "nested" / "eval.txt"
     payload = sdk.run("write file notes/nested/eval.txt content: nested eval", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "write_file")
@@ -327,6 +342,7 @@ def _case_write_nested_approval(workspace: Path) -> dict[str, object]:
 
 
 def _case_write_update_existing_approval(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：写入更新existing审批。"""
     target = workspace / "notes" / "existing.txt"
     target.parent.mkdir()
     target.write_text("before\n", encoding="utf-8")
@@ -339,6 +355,7 @@ def _case_write_update_existing_approval(workspace: Path) -> dict[str, object]:
 
 
 def _case_write_stale_after_target_change(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：写入过期之后target变更。"""
     target = workspace / "notes" / "stale.txt"
     target.parent.mkdir()
     target.write_text("before\n", encoding="utf-8")
@@ -352,6 +369,7 @@ def _case_write_stale_after_target_change(workspace: Path) -> dict[str, object]:
 
 
 def _case_replace_approval(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：替换审批。"""
     target = workspace / "README.md"
     payload = sdk.run("replace text README.md old: # Sample Agent new: # Eval Agent", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "replace_text")
@@ -363,6 +381,7 @@ def _case_replace_approval(workspace: Path) -> dict[str, object]:
 
 
 def _case_replace_reject(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：替换拒绝。"""
     target = workspace / "README.md"
     before = target.read_text(encoding="utf-8")
     payload = sdk.run("replace text README.md old: Sample Agent new: Rejected Agent", workspace, collect_events=True)
@@ -374,6 +393,7 @@ def _case_replace_reject(workspace: Path) -> dict[str, object]:
 
 
 def _case_replace_all_approval(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：替换全部审批。"""
     target = workspace / "docs" / "guide.md"
     payload = sdk.run("replace text docs/guide.md old: alpha new: beta replace_all: true", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "replace_text")
@@ -385,6 +405,7 @@ def _case_replace_all_approval(workspace: Path) -> dict[str, object]:
 
 
 def _case_replace_missing_text_blocked(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：替换缺失文本阻断。"""
     payload = sdk.run("replace text README.md old: not-present-token new: nope", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "replace_text")
     preview = approval["details"]["effect_preview"]
@@ -395,6 +416,7 @@ def _case_replace_missing_text_blocked(workspace: Path) -> dict[str, object]:
 
 
 def _case_apply_patch_create_approval(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：应用补丁创建审批。"""
     target = workspace / "notes" / "patched.txt"
     payload = sdk.run(f"apply patch patch: {_patch_create_text()}", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "apply_patch")
@@ -405,6 +427,7 @@ def _case_apply_patch_create_approval(workspace: Path) -> dict[str, object]:
 
 
 def _case_apply_patch_update_approval(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：应用补丁更新审批。"""
     target = workspace / "README.md"
     payload = sdk.run(f"apply patch patch: {_patch_update_readme_text()}", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "apply_patch")
@@ -415,6 +438,7 @@ def _case_apply_patch_update_approval(workspace: Path) -> dict[str, object]:
 
 
 def _case_apply_patch_reject(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：应用补丁拒绝。"""
     target = workspace / "notes" / "patched.txt"
     payload = sdk.run(f"apply patch patch: {_patch_create_text()}", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "apply_patch")
@@ -425,6 +449,7 @@ def _case_apply_patch_reject(workspace: Path) -> dict[str, object]:
 
 
 def _case_apply_patch_stale_after_change(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：应用补丁过期之后变更。"""
     target = workspace / "README.md"
     payload = sdk.run(f"apply patch patch: {_patch_update_readme_text()}", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "apply_patch")
@@ -436,6 +461,7 @@ def _case_apply_patch_stale_after_change(workspace: Path) -> dict[str, object]:
 
 
 def _case_shell_blocked(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：Shell阻断。"""
     target = workspace / "README.md"
     payload = sdk.run("run shell command: Remove-Item README.md", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "run_shell")
@@ -448,6 +474,7 @@ def _case_shell_blocked(workspace: Path) -> dict[str, object]:
 
 
 def _case_shell_safe_command(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：Shell安全命令。"""
     payload = sdk.run("run shell command: python --version", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "run_shell")
     preview = approval["details"]["effect_preview"]
@@ -459,6 +486,7 @@ def _case_shell_safe_command(workspace: Path) -> dict[str, object]:
 
 
 def _case_shell_empty_blocked(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：Shell空命令阻断。"""
     payload = sdk.run("run shell command: ", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "run_shell")
     preview = approval["details"]["effect_preview"]
@@ -467,6 +495,7 @@ def _case_shell_empty_blocked(workspace: Path) -> dict[str, object]:
 
 
 def _case_shell_write_risk_preview(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：Shell写入风险预览。"""
     payload = sdk.run("run shell command: echo hello > notes.txt", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "run_shell")
     preview = approval["details"]["effect_preview"]
@@ -476,6 +505,7 @@ def _case_shell_write_risk_preview(workspace: Path) -> dict[str, object]:
 
 
 def _case_shell_network_risk_preview(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：Shell网络风险预览。"""
     payload = sdk.run("run shell command: curl https://example.com", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "run_shell")
     preview = approval["details"]["effect_preview"]
@@ -485,6 +515,7 @@ def _case_shell_network_risk_preview(workspace: Path) -> dict[str, object]:
 
 
 def _case_checkpoint_rewind(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：检查点回退。"""
     target = workspace / "README.md"
     checkpoint = sdk.create_checkpoint(workspace, label="baseline checkpoint", collect_events=True)
     checkpoint_id = str(_single_event(checkpoint, "checkpoint_created", None)["details"]["checkpoint_id"])
@@ -497,6 +528,7 @@ def _case_checkpoint_rewind(workspace: Path) -> dict[str, object]:
 
 
 def _case_checkpoint_list_after_create(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：检查点列表之后创建。"""
     checkpoint = sdk.create_checkpoint(workspace, label="listed checkpoint", collect_events=True)
     checkpoint_id = str(_single_event(checkpoint, "checkpoint_created", None)["details"]["checkpoint_id"])
     listed = sdk.list_checkpoints(workspace, session_id=checkpoint["session_id"])
@@ -506,6 +538,7 @@ def _case_checkpoint_list_after_create(workspace: Path) -> dict[str, object]:
 
 
 def _case_rewind_restores_nested_file(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：回退restores嵌套文件。"""
     target = workspace / "docs" / "guide.md"
     checkpoint = sdk.create_checkpoint(workspace, label="nested checkpoint", collect_events=True)
     checkpoint_id = str(_single_event(checkpoint, "checkpoint_created", None)["details"]["checkpoint_id"])
@@ -518,6 +551,7 @@ def _case_rewind_restores_nested_file(workspace: Path) -> dict[str, object]:
 
 
 def _case_multiple_checkpoint_rewind(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：multiple检查点回退。"""
     target = workspace / "README.md"
     first = sdk.create_checkpoint(workspace, label="first checkpoint", collect_events=True)
     first_id = str(_single_event(first, "checkpoint_created", None)["details"]["checkpoint_id"])
@@ -532,6 +566,7 @@ def _case_multiple_checkpoint_rewind(workspace: Path) -> dict[str, object]:
 
 
 def _case_project_memory(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：项目记忆。"""
     payload = sdk.run("remember this runtime should call tools through ToolRegistry", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "save_project_memory")
     approved = sdk.approve(workspace, str(approval["details"]["approval_id"]), session_id=payload["session_id"], collect_events=True)
@@ -543,6 +578,7 @@ def _case_project_memory(workspace: Path) -> dict[str, object]:
 
 
 def _case_project_memory_recall_context(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：项目记忆召回上下文。"""
     payload = sdk.run("remember this release gates should use doctor strict mode", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "save_project_memory")
     sdk.approve(workspace, str(approval["details"]["approval_id"]), session_id=payload["session_id"], collect_events=True)
@@ -552,6 +588,7 @@ def _case_project_memory_recall_context(workspace: Path) -> dict[str, object]:
 
 
 def _case_project_memory_no_match(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：项目记忆nomatch。"""
     payload = sdk.run("search project memory no-such-memory-token", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "search_project_memory")
     _assert("No generic memory matched" in payload["assistant"], "empty project memory search did not report no matches")
@@ -559,6 +596,7 @@ def _case_project_memory_no_match(workspace: Path) -> dict[str, object]:
 
 
 def _case_save_blueprint_memory(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：save蓝图记忆。"""
     payload = sdk.run("save blueprint", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "save_blueprint_memory")
     approved = sdk.approve(workspace, str(approval["details"]["approval_id"]), session_id=payload["session_id"], collect_events=True)
@@ -568,6 +606,7 @@ def _case_save_blueprint_memory(workspace: Path) -> dict[str, object]:
 
 
 def _case_search_blueprint_memory(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：搜索蓝图记忆。"""
     save = sdk.run("save blueprint", workspace, collect_events=True)
     approval = _single_event(save, "approval_required", "save_blueprint_memory")
     sdk.approve(workspace, str(approval["details"]["approval_id"]), session_id=save["session_id"], collect_events=True)
@@ -578,6 +617,7 @@ def _case_search_blueprint_memory(workspace: Path) -> dict[str, object]:
 
 
 def _case_blueprint_analysis(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：蓝图分析。"""
     payload = sdk.run("analyze repo blueprint", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "analyze_repo_blueprint")
     blueprint = event["details"]["blueprint"]
@@ -587,6 +627,7 @@ def _case_blueprint_analysis(workspace: Path) -> dict[str, object]:
 
 
 def _case_repo_index(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：仓库索引。"""
     payload = sdk.run("index repo", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "index_repo_structure")
     repo_index = event["details"]["repo_index"]
@@ -596,6 +637,7 @@ def _case_repo_index(workspace: Path) -> dict[str, object]:
 
 
 def _case_blueprint_memory_empty_search(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：蓝图记忆空命令搜索。"""
     payload = sdk.run("search blueprint no-such-blueprint-token", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "search_blueprint_memory")
     _assert("No blueprint memory matched" in payload["assistant"], "empty blueprint search did not report no matches")
@@ -603,6 +645,7 @@ def _case_blueprint_memory_empty_search(workspace: Path) -> dict[str, object]:
 
 
 def _case_memory_index_pipeline(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：记忆索引流程。"""
     report = sdk.refresh_memory(workspace)
     result = sdk.search_memory(workspace, "ToolRegistry runtime", limit=3)
     _assert(report["index"]["chunk_count"] >= 1, "memory index did not create chunks")
@@ -615,6 +658,7 @@ def _case_memory_index_pipeline(workspace: Path) -> dict[str, object]:
 
 
 def _case_subagent(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：子 Agent。"""
     payload = sdk.run("use subagent to list files", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "spawn_subagent")
     result = event["details"]["subagent_result"]
@@ -624,6 +668,7 @@ def _case_subagent(workspace: Path) -> dict[str, object]:
 
 
 def _case_subagent_read_file(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：子 Agent读取文件。"""
     payload = sdk.run("use subagent to read README.md", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "spawn_subagent")
     result = event["details"]["subagent_result"]
@@ -633,6 +678,7 @@ def _case_subagent_read_file(workspace: Path) -> dict[str, object]:
 
 
 def _case_subagent_search_text(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：子 Agent搜索文本。"""
     payload = sdk.run("subagent search ToolRegistry", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "spawn_subagent")
     result = event["details"]["subagent_result"]
@@ -641,6 +687,7 @@ def _case_subagent_search_text(workspace: Path) -> dict[str, object]:
 
 
 def _case_subagent_plan(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：子 Agent计划。"""
     payload = sdk.run("run subagent plan", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "run_subagent_plan")
     result = event["details"]["subagent_plan"]
@@ -650,6 +697,7 @@ def _case_subagent_plan(workspace: Path) -> dict[str, object]:
 
 
 def _case_web_private_block(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：Web私有网络block。"""
     payload = sdk.run("web fetch url: http://127.0.0.1:8000/secret", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "web_fetch")
     _assert(approval["details"]["effect_preview"]["blocked"] is True, "private URL preview was not blocked")
@@ -660,6 +708,7 @@ def _case_web_private_block(workspace: Path) -> dict[str, object]:
 
 
 def _case_web_invalid_url_block(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：Web非法URLblock。"""
     payload = sdk.run("web fetch url: not-a-valid-url", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "web_fetch")
     preview = approval["details"]["effect_preview"]
@@ -668,6 +717,7 @@ def _case_web_invalid_url_block(workspace: Path) -> dict[str, object]:
 
 
 def _case_web_public_preview(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：Web公网预览。"""
     payload = sdk.run("web fetch url: https://example.com", workspace, collect_events=True)
     approval = _single_event(payload, "approval_required", "web_fetch")
     preview = approval["details"]["effect_preview"]
@@ -677,6 +727,7 @@ def _case_web_public_preview(workspace: Path) -> dict[str, object]:
 
 
 def _case_repo_import_plan(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：仓库导入计划。"""
     payload = sdk.run("github import https://github.com/openai/codex/tree/main", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "prepare_repo_import")
     plan = event["details"]["import_plan"]
@@ -687,6 +738,7 @@ def _case_repo_import_plan(workspace: Path) -> dict[str, object]:
 
 
 def _case_repo_import_shorthand(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：仓库导入简写。"""
     payload = sdk.run("github import openai/codex", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "prepare_repo_import")
     plan = event["details"]["import_plan"]
@@ -696,6 +748,7 @@ def _case_repo_import_shorthand(workspace: Path) -> dict[str, object]:
 
 
 def _case_repo_import_ssh(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：仓库导入SSH。"""
     payload = sdk.run("github import git@github.com:openai/codex.git", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "prepare_repo_import")
     plan = event["details"]["import_plan"]
@@ -705,6 +758,7 @@ def _case_repo_import_ssh(workspace: Path) -> dict[str, object]:
 
 
 def _case_repo_import_branch_nested(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：仓库导入分支嵌套。"""
     payload = sdk.run("github import https://github.com/openai/codex/tree/feature/demo/path", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "prepare_repo_import")
     plan = event["details"]["import_plan"]
@@ -713,6 +767,7 @@ def _case_repo_import_branch_nested(workspace: Path) -> dict[str, object]:
 
 
 def _case_repo_import_local_ready(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：仓库导入本地就绪。"""
     payload = sdk.run("repo import .", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "prepare_repo_import")
     plan = event["details"]["import_plan"]
@@ -723,6 +778,7 @@ def _case_repo_import_local_ready(workspace: Path) -> dict[str, object]:
 
 
 def _case_repo_import_local_cache(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：仓库导入本地缓存。"""
     source = workspace / "source_repo"
     source.mkdir()
     _write_sample_repo(source)
@@ -738,6 +794,7 @@ def _case_repo_import_local_cache(workspace: Path) -> dict[str, object]:
 
 
 def _case_repo_git_status(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：仓库Git状态。"""
     payload = sdk.run("repo status", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "repo_git_status")
     git = event["details"]["git"]
@@ -747,6 +804,7 @@ def _case_repo_git_status(workspace: Path) -> dict[str, object]:
 
 
 def _case_project_plan(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：项目计划。"""
     payload = sdk.run("project plan goal: add a safe eval runner", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "build_project_plan")
     plan = event["details"]["plan"]
@@ -758,6 +816,7 @@ def _case_project_plan(workspace: Path) -> dict[str, object]:
 
 
 def _case_project_plan_goal_preserved(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：项目计划目标保留。"""
     goal = "document strict release gates"
     payload = sdk.run(f"project plan goal: {goal}", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "build_project_plan")
@@ -768,6 +827,7 @@ def _case_project_plan_goal_preserved(workspace: Path) -> dict[str, object]:
 
 
 def _case_web_ui_smoke(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：WebUIsmoke。"""
     manager = WebSessionManager(default_workspace=workspace)
     server = CodeMuseServer(("127.0.0.1", 0), manager)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -794,6 +854,7 @@ def _case_web_ui_smoke(workspace: Path) -> dict[str, object]:
 
 
 def _case_web_api_session_list(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：WebAPI会话列表。"""
     manager = WebSessionManager(default_workspace=workspace)
     server = CodeMuseServer(("127.0.0.1", 0), manager)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -811,6 +872,7 @@ def _case_web_api_session_list(workspace: Path) -> dict[str, object]:
 
 
 def _case_web_api_approval_flow(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：WebAPI审批流程。"""
     manager = WebSessionManager(default_workspace=workspace)
     server = CodeMuseServer(("127.0.0.1", 0), manager)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -831,6 +893,7 @@ def _case_web_api_approval_flow(workspace: Path) -> dict[str, object]:
 
 
 def _case_web_api_checkpoint_flow(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：WebAPI检查点流程。"""
     manager = WebSessionManager(default_workspace=workspace)
     server = CodeMuseServer(("127.0.0.1", 0), manager)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -851,6 +914,7 @@ def _case_web_api_checkpoint_flow(workspace: Path) -> dict[str, object]:
 
 
 def _case_capability_catalog(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：能力目录。"""
     _write_skill(workspace)
     _write_extension(workspace)
     capabilities = sdk.list_capabilities(workspace)
@@ -879,6 +943,7 @@ def _case_capability_catalog(workspace: Path) -> dict[str, object]:
 
 
 def _case_capability_kind_filter_builtin(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：能力类型过滤内置。"""
     capabilities = sdk.list_capabilities(workspace, kind="builtin_tool")
     names = {item["name"] for item in capabilities}
     _assert("list_files" in names, "builtin filter missed list_files")
@@ -887,6 +952,7 @@ def _case_capability_kind_filter_builtin(workspace: Path) -> dict[str, object]:
 
 
 def _case_skill_runtime_execution(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：Skill运行时执行。"""
     _write_skill(workspace)
     payload = sdk.run("run skill name: experiment-report for eval summary", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "run_skill")
@@ -896,6 +962,7 @@ def _case_skill_runtime_execution(workspace: Path) -> dict[str, object]:
 
 
 def _case_extension_runtime_execution(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：扩展运行时执行。"""
     _write_extension(workspace)
     payload = sdk.run("run extension name: project-extension with eval input", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "run_extension")
@@ -905,6 +972,7 @@ def _case_extension_runtime_execution(workspace: Path) -> dict[str, object]:
 
 
 def _case_extension_dynamic_tool(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：扩展动态工具。"""
     _write_extension(workspace)
     payload = sdk.run("extension tool summarize eval input", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "extension__project_extension__summarize")
@@ -913,6 +981,7 @@ def _case_extension_dynamic_tool(workspace: Path) -> dict[str, object]:
 
 
 def _case_mcp_catalog(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：MCP目录。"""
     _write_mcp_config(workspace)
     capabilities = sdk.list_capabilities(workspace, kind="mcp_tool")
     names = {item["name"] for item in capabilities}
@@ -921,6 +990,7 @@ def _case_mcp_catalog(workspace: Path) -> dict[str, object]:
 
 
 def _case_mcp_tool_execution(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：MCP工具执行。"""
     _write_mcp_config(workspace)
     payload = sdk.run("mcp echo hello from eval", workspace, collect_events=True)
     _assert_event(payload, "tool_result", "mcp__demo__echo")
@@ -929,6 +999,7 @@ def _case_mcp_tool_execution(workspace: Path) -> dict[str, object]:
 
 
 def _case_mcp_status(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：MCP状态。"""
     _write_mcp_config(workspace)
     payload = sdk.run("mcp status", workspace, collect_events=True)
     event = _single_event(payload, "tool_result", "mcp_status")
@@ -939,6 +1010,7 @@ def _case_mcp_status(workspace: Path) -> dict[str, object]:
 
 
 def _case_demo_packaged(workspace: Path) -> dict[str, object]:
+    """执行 baseline 评测用例：演示打包资源。"""
     report = run_demo(save_report=False)
     _assert(report.failed == 0, "packaged demo failed")
     _assert(report.total_steps == 5, "packaged demo step count changed unexpectedly")
@@ -946,6 +1018,7 @@ def _case_demo_packaged(workspace: Path) -> dict[str, object]:
 
 
 def _write_sample_repo(root: Path) -> None:
+    """写入sample仓库。"""
     (root / "README.md").write_text(
         "# Sample Agent\n\nA tiny coding agent for deterministic evals.\n",
         encoding="utf-8",
@@ -963,6 +1036,7 @@ def _write_sample_repo(root: Path) -> None:
 
 
 def _patch_create_text() -> str:
+    """处理 补丁创建文本。"""
     return "\n".join(
         [
             "--- /dev/null",
@@ -974,6 +1048,7 @@ def _patch_create_text() -> str:
 
 
 def _patch_update_readme_text() -> str:
+    """处理 补丁更新readme文本。"""
     return "\n".join(
         [
             "--- a/README.md",
@@ -988,6 +1063,7 @@ def _patch_update_readme_text() -> str:
 
 
 def _write_skill(root: Path) -> None:
+    """写入Skill。"""
     skill_dir = root / "skills" / "experiment-report"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
@@ -997,6 +1073,7 @@ def _write_skill(root: Path) -> None:
 
 
 def _write_extension(root: Path) -> None:
+    """写入扩展。"""
     extension_dir = root / "extensions" / "project-extension"
     extension_dir.mkdir(parents=True)
     payload = {
@@ -1019,6 +1096,7 @@ def _write_extension(root: Path) -> None:
 
 
 def _write_mcp_config(root: Path) -> None:
+    """写入MCPconfig。"""
     payload = {
         "servers": [
             {
@@ -1038,6 +1116,7 @@ def _write_mcp_config(root: Path) -> None:
 
 
 def _http_json(url: str, *, method: str = "GET", payload: dict[str, object] | None = None) -> dict[str, object]:
+    """处理 HTTPJSON。"""
     data = None
     headers = {}
     if payload is not None:
@@ -1052,11 +1131,13 @@ def _http_json(url: str, *, method: str = "GET", payload: dict[str, object] | No
 
 
 def _http_text(url: str) -> str:
+    """处理 HTTP文本。"""
     with urllib.request.urlopen(url, timeout=3) as response:
         return response.read().decode("utf-8")
 
 
 def _wait_for_session_event(handle, event_type: str, *, timeout: float = 3.0) -> dict[str, object]:
+    """等待for会话事件。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         events = handle.events_after(0)["events"]
@@ -1068,6 +1149,7 @@ def _wait_for_session_event(handle, event_type: str, *, timeout: float = 3.0) ->
 
 
 def _details(payload: dict[str, object]) -> dict[str, object]:
+    """处理 详情。"""
     events = payload.get("events", [])
     tool_names = [
         str(event.get("tool_name"))
@@ -1081,6 +1163,7 @@ def _details(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _single_event(payload: dict[str, object], event_type: str, tool_name: str | None) -> dict[str, object]:
+    """提取单个事件。"""
     matches = [
         event
         for event in payload.get("events", [])
@@ -1093,6 +1176,7 @@ def _single_event(payload: dict[str, object], event_type: str, tool_name: str | 
 
 
 def _assert_event(payload: dict[str, object], event_type: str, tool_name: str | None) -> None:
+    """断言事件。"""
     for event in payload.get("events", []):
         if not isinstance(event, dict):
             continue
@@ -1102,6 +1186,7 @@ def _assert_event(payload: dict[str, object], event_type: str, tool_name: str | 
 
 
 def _assert_no_event(payload: dict[str, object], event_type: str, tool_name: str | None) -> None:
+    """断言no事件。"""
     for event in payload.get("events", []):
         if not isinstance(event, dict):
             continue
@@ -1110,11 +1195,13 @@ def _assert_no_event(payload: dict[str, object], event_type: str, tool_name: str
 
 
 def _assert(condition: bool, message: str) -> None:
+    """断言基线评测。"""
     if not condition:
         raise AssertionError(message)
 
 
 def _numeric_metrics(details: dict[str, object]) -> dict[str, float | int | str]:
+    """处理 数值指标。"""
     metrics: dict[str, float | int | str] = {}
     for key, value in details.items():
         if isinstance(value, (int, float, str)):

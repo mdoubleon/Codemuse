@@ -49,6 +49,7 @@ class FileMemoryChunk:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """将 FileMemoryChunk 转换为可序列化字典。"""
         return {
             "chunk_id": self.chunk_id,
             "path": self.path,
@@ -62,6 +63,7 @@ class FileMemoryChunk:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "FileMemoryChunk":
+        """从字典数据恢复 FileMemoryChunk。"""
         return cls(
             chunk_id=str(payload["chunk_id"]),
             path=str(payload.get("path") or ""),
@@ -156,6 +158,7 @@ def chunk_workspace(
 
 
 def _iter_indexable_files(root: Path, *, suffixes: set[str]) -> list[Path]:
+    """遍历indexable文件。"""
     paths: list[Path] = []
     for path in root.rglob("*"):
         if not path.is_file():
@@ -169,5 +172,6 @@ def _iter_indexable_files(root: Path, *, suffixes: set[str]) -> list[Path]:
 
 
 def _chunk_id(path: str, start_line: int, end_line: int, text: str) -> str:
+    """处理 分块ID。"""
     digest = hashlib.sha256(f"{path}:{start_line}:{end_line}:{text}".encode("utf-8")).hexdigest()
     return digest[:24]

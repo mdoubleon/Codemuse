@@ -1,4 +1,4 @@
-"""模块说明：CodeMuse 模型 Provider 基础协议模块。"""
+"""定义模型 Provider 基础协议、元信息和就绪状态结构。"""
 from __future__ import annotations
 
 from dataclasses import dataclass

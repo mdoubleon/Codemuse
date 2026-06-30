@@ -1,4 +1,4 @@
-﻿"""合并默认配置、项目配置和运行时覆盖，产生有效配置快照。"""
+"""合并默认配置、项目配置和运行时覆盖，产生有效配置快照。"""
 from __future__ import annotations
 
 import json
@@ -41,24 +41,24 @@ class ConfigSnapshot:
 
 
 class ConfigManager:
-    """ConfigManager：协调该领域对象的创建、查询和生命周期。"""
+    """负责加载、合并、更新 workspace 的 CodeMuse 配置。"""
     def __init__(self, workspace: Path) -> None:
-        """注入该管理器需要协调的配置、注册表或存储依赖。"""
+        """初始化配置目录路径和并发读写锁。"""
         self.workspace = workspace.resolve()
         self.config_dir = self.workspace / CONFIG_DIR
         self.config_path = self.config_dir / CONFIG_FILE
         self._lock = RLock()
 
     def get_project_config(self) -> dict[str, Any]:
-        """读取该领域的单个对象或有效快照。"""
+        """读取 workspace 项目配置文件中的配置内容。"""
         return self._read_project_config()
 
     def get_effective_config(self) -> CodeMuseConfig:
-        """读取该领域的单个对象或有效快照。"""
+        """返回合并默认值、项目配置和运行时覆盖后的有效配置。"""
         return self.get_snapshot().config
 
     def get_snapshot(self) -> ConfigSnapshot:
-        """读取该领域的单个对象或有效快照。"""
+        """返回包含配置来源和有效配置的快照。"""
         with self._lock:
             default_payload = default_config().to_dict()
             environment = _environment_config_patch()
@@ -118,7 +118,7 @@ class ConfigManager:
         return config_schema()
 
     def _read_project_config(self) -> dict[str, Any]:
-        """读取内部数据并转换为当前模块需要的结构。"""
+        """读取并校验 workspace 中的项目配置 JSON。"""
         if not self.config_path.exists():
             return {}
         try:
@@ -130,18 +130,18 @@ class ConfigManager:
         return data
 
     def _write_project_config(self, data: dict[str, Any]) -> None:
-        """将内部数据写入本地存储。"""
+        """把项目配置字典写回 .codemuse/config.json。"""
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def get_config_manager(workspace: Path) -> ConfigManager:
-    """读取该领域的单个对象或有效快照。"""
+    """为指定 workspace 创建配置管理器。"""
     return ConfigManager(workspace)
 
 
 def config_for_workspace(workspace: Path) -> CodeMuseConfig:
-    """读取 workspace 最终生效的 CodeMuseConfig。"""
+    """返回 workspace 当前生效的 CodeMuse 配置。"""
     return get_config_manager(workspace).get_effective_config()
 
 

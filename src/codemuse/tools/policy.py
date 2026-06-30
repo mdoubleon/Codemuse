@@ -1,4 +1,4 @@
-"""实现 tools/policy.py 对应的业务边界和辅助逻辑。"""
+"""根据工具权限域和副作用声明计算工具执行安全策略。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -12,7 +12,7 @@ DENY = "deny"
 
 @dataclass
 class ToolPolicyDecision:
-    """ToolPolicyDecision：封装该领域需要传递的数据和行为。"""
+    """记录工具安全策略的动作、原因和附加详情。"""
     action: str
     reason: str = ""
     details: dict[str, object] = field(default_factory=dict)

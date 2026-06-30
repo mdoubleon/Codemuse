@@ -1,1 +1,1 @@
-"""实现 runtime/session_host.py 对应的业务边界和辅助逻辑。"""
+"""预留会话宿主层，连接入口层、队列和 AgentRuntime。"""

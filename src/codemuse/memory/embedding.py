@@ -31,12 +31,14 @@ def hashed_embedding(text: str, *, dimensions: int = 96) -> list[float]:
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
+    """处理 cosinesimilarity。"""
     if not left or not right or len(left) != len(right):
         return 0.0
     return sum(a * b for a, b in zip(left, right))
 
 
 def normalize(vector: list[float]) -> list[float]:
+    """处理 normalize。"""
     length = math.sqrt(sum(value * value for value in vector))
     if length == 0:
         return vector

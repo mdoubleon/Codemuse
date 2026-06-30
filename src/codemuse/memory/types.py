@@ -1,4 +1,4 @@
-"""实现 memory/types.py 对应的业务边界和辅助逻辑。"""
+"""定义记忆检索和索引流程中共享的数据类型。"""
 from __future__ import annotations
 
 import time

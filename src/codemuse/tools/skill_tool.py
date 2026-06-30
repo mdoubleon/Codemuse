@@ -12,11 +12,13 @@ class RunSkillTool(BaseTool):
     """Render a discovered SKILL.md as a bounded runtime instruction result."""
 
     def __init__(self, workspace: Path, runtime: SkillRuntime) -> None:
+        """初始化 RunSkillTool 并保存运行依赖。"""
         super().__init__(workspace)
         self.runtime = runtime
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 RunSkillTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name="run_skill",
             description="Load a discovered workspace skill and return its bounded instructions for the current task.",
@@ -34,6 +36,7 @@ class RunSkillTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 RunSkillTool 的工具逻辑并返回 ToolResult。"""
         name = str(arguments.get("name") or "").strip()
         if not name:
             raise ValueError("run_skill requires a skill name.")

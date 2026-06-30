@@ -9,6 +9,7 @@ from codemuse.domain.project_plan import ProjectPlan, ProjectPlanTask
 
 
 def build_project_plan_from_blueprint(blueprint: RepoBlueprint, *, goal: str) -> ProjectPlan:
+    """构建项目计划from蓝图。"""
     clean_goal = goal.strip() or "Understand and evolve this repository safely."
     task_counter = count(1)
     tasks: list[ProjectPlanTask] = []
@@ -101,6 +102,7 @@ def build_project_plan_from_blueprint(blueprint: RepoBlueprint, *, goal: str) ->
 
 
 def format_project_plan(plan: ProjectPlan) -> str:
+    """格式化项目计划。"""
     lines = [
         f"# Project Plan: {plan.title}",
         "",
@@ -146,6 +148,7 @@ def _task(
     depends_on: list[str] | None = None,
     acceptance: list[str] | None = None,
 ) -> ProjectPlanTask:
+    """处理 任务。"""
     task_id = f"T{next(task_counter):02d}"
     return ProjectPlanTask(
         task_id=task_id,
@@ -159,6 +162,7 @@ def _task(
 
 
 def _risks(blueprint: RepoBlueprint) -> list[str]:
+    """处理 风险。"""
     risks = [
         "Blueprint-derived plans are heuristic; confirm module ownership before editing.",
         "High-risk tools still require approval and checkpoint protection before changes land.",
@@ -171,6 +175,7 @@ def _risks(blueprint: RepoBlueprint) -> list[str]:
 
 
 def _verification_steps(blueprint: RepoBlueprint) -> list[str]:
+    """处理 验证步骤。"""
     steps = ["Run focused unit tests for changed modules.", "Run `python scripts\\run_eval.py --output evals\\reports` after cross-layer changes."]
     if blueprint.key_files:
         steps.append("Re-run blueprint analysis and compare key files if architecture changed.")
@@ -178,8 +183,10 @@ def _verification_steps(blueprint: RepoBlueprint) -> list[str]:
 
 
 def _first_paths(values: list[str], limit: int) -> list[str]:
+    """处理 首批路径。"""
     return [value for value in values if value][:limit]
 
 
 def _stable_id(*parts: str) -> str:
+    """处理 稳定ID。"""
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]

@@ -303,7 +303,7 @@ def _infer_learning_notes(index: RepoIndex, modules: list[ModuleSummary]) -> lis
 
 
 def _module_names_from_files(index: RepoIndex) -> list[str]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """从仓库文件线索中提取候选模块路径。"""
     candidates: list[str] = []
     all_paths = _unique(
         index.important_files
@@ -328,7 +328,7 @@ def _module_names_from_files(index: RepoIndex) -> list[str]:
 
 
 def _module_signals(name: str, index: RepoIndex) -> list[str]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """收集某个模块下能说明其职责的文件线索。"""
     prefix = name.rstrip("/") + "/"
     values = []
     for rel in _unique(index.important_files + index.entrypoints + index.agent_related_files + index.route_files + index.test_files):
@@ -338,12 +338,12 @@ def _module_signals(name: str, index: RepoIndex) -> list[str]:
 
 
 def _module_key(path: str) -> str:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """从模块路径中提取用于角色匹配的短名。"""
     return path.rstrip("/").split("/")[-1].lower()
 
 
 def _package_stack_clues(root: Path, package_files: list[str]) -> list[str]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """从包管理和项目配置文件中提取技术栈线索。"""
     clues: list[str] = []
     for rel in package_files:
         path = root / rel
@@ -368,7 +368,7 @@ def _package_stack_clues(root: Path, package_files: list[str]) -> list[str]:
 
 
 def _package_json_clues(text: str) -> list[str]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """从 package.json 依赖中提取前端或 Node 技术栈线索。"""
     clues = ["Node package metadata"]
     try:
         payload = json.loads(text)
@@ -390,13 +390,13 @@ def _package_json_clues(text: str) -> list[str]:
 
 
 def _keyword_clues(text: str, keywords: list[str]) -> list[str]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """根据关键词在配置文本中的命中情况生成技术栈线索。"""
     lowered = text.lower()
     return [f"{keyword} dependency/config" for keyword in keywords if keyword in lowered]
 
 
 def _read_readme(root: Path) -> str:
-    """读取内部数据并转换为当前模块需要的结构。"""
+    """读取仓库根目录下的 README 文件内容。"""
     for path in sorted(root.glob("README*")):
         if path.is_file():
             try:
@@ -407,14 +407,14 @@ def _read_readme(root: Path) -> str:
 
 
 def _bullet_list(values: list[str]) -> str:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """把字符串列表格式化为 Markdown 项目符号列表。"""
     if not values:
         return "- None detected."
     return "\n".join(f"- {value}" for value in values)
 
 
 def _compact(text: str, *, max_chars: int) -> str:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """压缩长文本并按最大字符数截断。"""
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= max_chars:
         return text
@@ -422,7 +422,7 @@ def _compact(text: str, *, max_chars: int) -> str:
 
 
 def _unique(values: list[str]) -> list[str]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """按首次出现顺序对字符串列表去重。"""
     seen: set[str] = set()
     result: list[str] = []
     for value in values:
@@ -434,6 +434,6 @@ def _unique(values: list[str]) -> list[str]:
 
 
 def _stable_id(*parts: str) -> str:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """基于输入片段生成稳定的短哈希 ID。"""
     digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
     return digest[:16]

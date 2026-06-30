@@ -1,4 +1,4 @@
-"""实现 mcp/results.py 对应的业务边界和辅助逻辑。"""
+"""定义 MCP 工具调用结果的统一数据结构。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

@@ -133,7 +133,7 @@ class CodeMuseConfig:
 
 
 class ConfigValidationError(ValueError):
-    """ConfigValidationError：封装该领域需要传递的数据和行为。"""
+    """表示项目配置解析或校验失败。"""
     pass
 
 
@@ -219,7 +219,7 @@ def config_schema() -> dict[str, Any]:
 
 
 def _object_value(value: Any, path: str) -> dict[str, Any]:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """校验配置片段是对象类型，并返回可修改的字典副本。"""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -228,14 +228,14 @@ def _object_value(value: Any, path: str) -> dict[str, Any]:
 
 
 def _bool_value(value: Any, path: str) -> bool:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """把配置值解析成布尔值，空值时使用默认值。"""
     if isinstance(value, bool):
         return value
     raise ConfigValidationError(f"{path} must be a boolean.")
 
 
 def _string_value(value: Any, path: str) -> str:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """把可选配置值解析成去除首尾空白的字符串。"""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -244,7 +244,7 @@ def _string_value(value: Any, path: str) -> str:
 
 
 def _reject_unknown_keys(data: dict[str, Any], allowed: set[str], prefix: str) -> None:
-    """为该流程的公共逻辑提供局部辅助处理。"""
+    """拒绝 schema 未声明的配置字段，避免拼写错误被静默忽略。"""
     unknown = sorted(set(data) - allowed)
     if not unknown:
         return

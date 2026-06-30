@@ -7,6 +7,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class SkillSearchRoot:
+    """定义 SkillSearchRoot的结构化数据。"""
     path: Path
     source: str
     precedence: int = 0
@@ -14,6 +15,7 @@ class SkillSearchRoot:
 
 @dataclass(frozen=True)
 class SkillDescriptor:
+    """描述 Skill 的名称、来源和元数据。"""
     name: str
     description: str
     path: Path
@@ -25,6 +27,7 @@ class SkillDescriptor:
 
 
 def skill_search_roots(workspace: Path) -> list[SkillSearchRoot]:
+    """处理 Skill搜索roots。"""
     workspace = workspace.resolve()
     return [
         SkillSearchRoot(workspace / ".codemuse" / "skills", source="project_config", precedence=0),
@@ -33,6 +36,7 @@ def skill_search_roots(workspace: Path) -> list[SkillSearchRoot]:
 
 
 def load_skills(workspace: Path, *, search_roots: list[SkillSearchRoot] | None = None) -> dict[str, SkillDescriptor]:
+    """加载skills。"""
     roots = search_roots or skill_search_roots(workspace)
     skills: dict[str, SkillDescriptor] = {}
     for root in sorted(roots, key=lambda item: item.precedence):
@@ -59,6 +63,7 @@ def load_skills(workspace: Path, *, search_roots: list[SkillSearchRoot] | None =
 
 
 def _parse_skill_descriptor(path: Path, root: SkillSearchRoot) -> SkillDescriptor:
+    """解析Skill描述符。"""
     rows = path.read_text(encoding="utf-8-sig").splitlines()
     metadata = _frontmatter(rows)
     if metadata is None:
@@ -76,6 +81,7 @@ def _parse_skill_descriptor(path: Path, root: SkillSearchRoot) -> SkillDescripto
 
 
 def _frontmatter(rows: list[str]) -> dict[str, str] | None:
+    """处理 Frontmatter。"""
     if not rows or rows[0].strip() != "---":
         return None
     body: list[str] = []
@@ -87,6 +93,7 @@ def _frontmatter(rows: list[str]) -> dict[str, str] | None:
 
 
 def _parse_key_values(rows: list[str]) -> dict[str, str]:
+    """解析键值。"""
     data: dict[str, str] = {}
     for row in rows:
         if ":" not in row:
@@ -97,6 +104,7 @@ def _parse_key_values(rows: list[str]) -> dict[str, str]:
 
 
 def _fallback_metadata(path: Path, rows: list[str]) -> dict[str, str]:
+    """处理 降级元数据。"""
     for row in rows:
         value = row.strip()
         if not value:

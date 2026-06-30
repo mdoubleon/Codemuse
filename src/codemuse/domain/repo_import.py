@@ -7,6 +7,7 @@ from typing import Any
 
 @dataclass
 class RepoImportPlan:
+    """定义 RepoImportPlan的结构化数据。"""
     source: str
     source_type: str
     repo_id: str
@@ -21,6 +22,7 @@ class RepoImportPlan:
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """将 RepoImportPlan 转换为可序列化字典。"""
         return {
             "source": self.source,
             "source_type": self.source_type,
@@ -38,6 +40,7 @@ class RepoImportPlan:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RepoImportPlan":
+        """从字典数据恢复 RepoImportPlan。"""
         return cls(
             source=str(data["source"]),
             source_type=str(data["source_type"]),

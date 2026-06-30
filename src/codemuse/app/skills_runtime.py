@@ -1,4 +1,4 @@
-"""Expose discovered workspace skills as metadata capabilities."""
+"""提供应用装配中 skills runtime 相关实现。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -10,18 +10,22 @@ from codemuse.skills.loader import SkillDescriptor, load_skills
 
 @dataclass
 class SkillRuntime:
+    """管理 SkillRuntime 运行时的状态、发现和执行入口。"""
     workspace: Path
     _skills: dict[str, SkillDescriptor] | None = field(default=None, init=False, repr=False)
 
     def available_skills(self) -> dict[str, SkillDescriptor]:
+        """处理 availableskills。"""
         if self._skills is None:
             self._skills = load_skills(self.workspace)
         return self._skills
 
     def reload(self) -> None:
+        """处理 reload。"""
         self._skills = None
 
     def run_skill(self, *, name: str, task: str = "", max_chars: int = 4000) -> dict[str, object]:
+        """运行Skill。"""
         skills = self.available_skills()
         if name not in skills:
             raise ValueError(f"Unknown skill: {name}")
@@ -58,9 +62,11 @@ class SkillRuntime:
 
 @dataclass
 class SkillCapabilityDiscoveryProvider:
+    """提供 SkillCapabilityDiscoveryProvider 的能力发现或适配逻辑。"""
     runtime: SkillRuntime
 
     def discover(self) -> list[CapabilityDescriptor]:
+        """发现应用装配。"""
         descriptors: list[CapabilityDescriptor] = []
         for skill in self.runtime.available_skills().values():
             descriptors.append(
@@ -85,4 +91,5 @@ class SkillCapabilityDiscoveryProvider:
         return descriptors
 
     def reload(self) -> None:
+        """处理 reload。"""
         self.runtime.reload()

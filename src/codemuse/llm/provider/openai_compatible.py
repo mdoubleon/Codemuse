@@ -31,6 +31,7 @@ class ProviderReadiness:
     reason: str = ""
 
     def to_dict(self) -> dict[str, object]:
+        """将 ProviderReadiness 转换为可序列化字典。"""
         return {
             "provider": self.provider,
             "model": self.model,
@@ -54,6 +55,7 @@ class OpenAICompatibleProvider:
         api_key_env: str = "OPENAI_API_KEY",
         timeout_seconds: int = 60,
     ) -> None:
+        """初始化 OpenAICompatibleProvider 并保存运行依赖。"""
         self.model = model
         self.base_url = _normalize_base_url(base_url or DEFAULT_OPENAI_COMPATIBLE_BASE_URL)
         self.api_key_env = api_key_env or "OPENAI_API_KEY"
@@ -66,6 +68,7 @@ class OpenAICompatibleProvider:
         return self._info
 
     def readiness(self) -> ProviderReadiness:
+        """处理 就绪状态。"""
         api_key_present = bool(os.environ.get(self.api_key_env))
         return ProviderReadiness(
             provider=self.info.provider,
@@ -95,6 +98,7 @@ class OpenAICompatibleProvider:
         return _response_from_payload(response, provider=self.info.provider, model=self.model)
 
     def _post_chat_completions(self, payload: dict[str, Any], *, api_key: str) -> dict[str, Any]:
+        """处理 postchatcompletions。"""
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         url = f"{self.base_url}/chat/completions"
         request = urllib.request.Request(
@@ -126,10 +130,12 @@ class OpenAICompatibleProvider:
 
 
 def _normalize_base_url(value: str) -> str:
+    """处理 normalize基础URL。"""
     return value.rstrip("/")
 
 
 def _message_to_payload(message: ChatMessage) -> dict[str, Any]:
+    """处理 消息to载荷。"""
     if message.role == "tool":
         return {
             "role": "tool",
@@ -153,6 +159,7 @@ def _message_to_payload(message: ChatMessage) -> dict[str, Any]:
 
 
 def _tool_to_payload(tool: ToolSpec) -> dict[str, Any]:
+    """处理 工具to载荷。"""
     return {
         "type": "function",
         "function": {
@@ -164,6 +171,7 @@ def _tool_to_payload(tool: ToolSpec) -> dict[str, Any]:
 
 
 def _response_from_payload(payload: dict[str, Any], *, provider: str, model: str) -> LLMResponse:
+    """处理 响应from载荷。"""
     choices = payload.get("choices") or []
     if not choices:
         raise RuntimeError("Provider response did not include choices.")

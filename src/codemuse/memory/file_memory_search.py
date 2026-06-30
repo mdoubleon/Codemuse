@@ -1,4 +1,4 @@
-"""实现 memory/file_memory_search.py 对应的业务边界和辅助逻辑。"""
+"""在项目记忆条目中执行关键词搜索和简单排序。"""
 from __future__ import annotations
 
 import re
@@ -20,7 +20,7 @@ def search_file_memory(store: FileMemoryStore, query: str, *, limit: int = 5) ->
 
 
 def _score(item: MemoryItem, terms: list[str]) -> int:
-    """计算搜索或排序时使用的简单相关性分数。"""
+    """按查询词在记忆条目字段中的命中次数计算相关性分数。"""
     haystack = " ".join(
         [
             item.title,

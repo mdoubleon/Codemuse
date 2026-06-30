@@ -194,7 +194,7 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
         return
 
     def _read_json(self) -> dict | None:
-        """读取内部数据并转换为当前模块需要的结构。"""
+        """读取 HTTP 请求体并解析成 JSON 对象。"""
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
             return {}
@@ -252,6 +252,7 @@ def _path_parts(path: str) -> list[str]:
 
 
 def _api_path_parts(path: str) -> list[str]:
+    """处理 APIpathparts。"""
     parts = _path_parts(path)
     if parts and parts[0] == "api":
         return parts[1:]
@@ -259,6 +260,7 @@ def _api_path_parts(path: str) -> list[str]:
 
 
 def _static_asset_name(path: str) -> str:
+    """处理 staticasset名称。"""
     if path.startswith("/assets/"):
         asset = path.removeprefix("/assets/")
         if asset and "/" not in asset and "\\" not in asset:
@@ -286,6 +288,7 @@ def _string_query(query: dict[str, list[str]], name: str, *, default: str) -> st
 
 
 def _bool_query(query: dict[str, list[str]], name: str, *, default: bool) -> bool:
+    """处理 boolquery。"""
     values = query.get(name)
     if not values:
         return default
@@ -293,6 +296,7 @@ def _bool_query(query: dict[str, list[str]], name: str, *, default: bool) -> boo
 
 
 def _resolve_workspace_path(workspace: Path, raw_path: str) -> Path:
+    """解析工作区path。"""
     candidate = Path(raw_path or ".")
     if not candidate.is_absolute():
         candidate = workspace / candidate
@@ -304,6 +308,7 @@ def _resolve_workspace_path(workspace: Path, raw_path: str) -> Path:
 
 
 def _latest_report_payload(workspace: Path) -> dict[str, object]:
+    """处理 latest报告载荷。"""
     report = workspace / "evals" / "reports" / "latest.json"
     failures = workspace / "evals" / "reports" / "failures.json"
     payload: dict[str, object] = {"exists": report.exists(), "report": None, "failures": None}

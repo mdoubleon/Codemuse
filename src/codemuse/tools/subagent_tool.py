@@ -1,4 +1,4 @@
-"""Expose bounded subagent execution as normal runtime tools."""
+"""提供工具系统中 subagent tool 相关实现。"""
 from __future__ import annotations
 
 import json
@@ -13,11 +13,13 @@ class SpawnSubAgentTool(BaseTool):
     """Run one focused bounded subagent task."""
 
     def __init__(self, workspace: Path, manager: SubAgentManager) -> None:
+        """初始化 SpawnSubAgentTool 并保存运行依赖。"""
         super().__init__(workspace)
         self.manager = manager
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 SpawnSubAgentTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name="spawn_subagent",
             description="Run a bounded read-only subagent for a focused research task.",
@@ -36,6 +38,7 @@ class SpawnSubAgentTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 SpawnSubAgentTool 的工具逻辑并返回 ToolResult。"""
         task = str(arguments.get("task") or "").strip()
         if not task:
             raise ValueError("spawn_subagent requires a task.")
@@ -56,11 +59,13 @@ class RunSubAgentPlanTool(BaseTool):
     """Run a bounded sequence of read-only subagent tasks."""
 
     def __init__(self, workspace: Path, manager: SubAgentManager) -> None:
+        """初始化 RunSubAgentPlanTool 并保存运行依赖。"""
         super().__init__(workspace)
         self.manager = manager
 
     @property
     def spec(self) -> ToolSpec:
+        """返回 RunSubAgentPlanTool 的 ToolSpec 声明。"""
         return ToolSpec(
             name="run_subagent_plan",
             description="Run a sequence of bounded read-only subagent tasks and return an aggregate trace.",
@@ -79,6 +84,7 @@ class RunSubAgentPlanTool(BaseTool):
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        """执行 RunSubAgentPlanTool 的工具逻辑并返回 ToolResult。"""
         tasks = [str(item) for item in arguments.get("tasks", [])]
         max_turns = int(arguments["max_turns"]) if arguments.get("max_turns") is not None else None
         result = self.manager.run_plan(
@@ -94,5 +100,6 @@ class RunSubAgentPlanTool(BaseTool):
 
 
 def register_subagent_tools(registry, workspace: Path, manager: SubAgentManager) -> None:
+    """注册子 Agenttools。"""
     registry.register(SpawnSubAgentTool(workspace, manager), category="subagent")
     registry.register(RunSubAgentPlanTool(workspace, manager), category="subagent")

@@ -11,7 +11,7 @@ from codemuse.mcp.config import MCPServerConfig, MCPToolConfig
 
 
 class MCPClientProtocol(Protocol):
-    """MCPClientProtocol：封装该领域需要传递的数据和行为。"""
+    """定义 MCP 客户端需要实现的工具发现和调用协议。"""
     def initialize(self) -> None:
         """初始化 MCP client/session，在 mock 实现中为后续调用预留状态。"""
         ...
@@ -77,7 +77,7 @@ class MockMCPClient:
         return None
 
     def _render_tool_content(self, tool: MCPToolConfig, arguments: dict) -> str:
-        """为该流程的公共逻辑提供局部辅助处理。"""
+        """根据工具配置和调用参数生成 mock MCP 工具返回文本。"""
         if tool.response_template:
             return _safe_format(tool.response_template, arguments)
         if tool.response:
@@ -87,7 +87,7 @@ class MockMCPClient:
 
 @dataclass
 class MCPSession:
-    """MCPSession：封装该领域需要传递的数据和行为。"""
+    """绑定 MCP server 描述和客户端实例的会话对象。"""
     server: MCPServerConfig
     client: MCPClientProtocol
     last_used_at: float
@@ -115,7 +115,7 @@ class MCPSessionManager:
         self._sessions: dict[str, MCPSession] = {}
 
     def get_or_create(self, server: MCPServerConfig) -> MCPSession:
-        """读取该领域的单个对象或有效快照。"""
+        """按 server 名称获取或创建 MCP 会话。"""
         session = self._sessions.get(server.name)
         if session is not None:
             session.touch(time.time())

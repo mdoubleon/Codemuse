@@ -78,7 +78,7 @@ class MCPServerConfig:
 
 @dataclass
 class MCPConfigDocument:
-    """MCPConfigDocument：封装该领域需要传递的数据和行为。"""
+    """保存一个 workspace 解析后的 MCP 配置文档。"""
     settings: MCPTransportSettings = field(default_factory=MCPTransportSettings)
     servers: list[MCPServerConfig] = field(default_factory=list)
 
