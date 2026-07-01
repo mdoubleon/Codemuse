@@ -1089,7 +1089,13 @@ kbd {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
 }
+.workspace-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
 .inline-form input,
+.workspace-form input,
 .api-form input,
 .api-form select {
   min-width: 0;
@@ -1108,6 +1114,137 @@ kbd {
   box-shadow: 0 0 0 3px var(--brand-glow);
 }
 .inline-form button { height: 34px; }
+.workspace-form button { height: 34px; }
+
+.file-browser {
+  display: grid;
+  grid-template-rows: minmax(180px, 34vh) minmax(220px, 1fr);
+  gap: 10px;
+  min-height: 0;
+}
+
+.file-tree,
+.file-preview {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.file-tree {
+  padding: 6px;
+}
+
+.file-branch {
+  display: grid;
+}
+
+.file-row {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 16px 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 8px 0 calc(8px + var(--indent, 0px));
+  border-radius: 7px;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.file-row:hover {
+  background: var(--bg-deep);
+  color: var(--text);
+}
+
+.file-row.selected {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.file-caret,
+.file-icon {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+
+.file-size {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.file-preview {
+  background: var(--panel-soft);
+}
+
+.file-preview-card {
+  min-height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.file-preview-card header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+
+.file-preview-card strong,
+.file-preview-card small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-preview-card strong {
+  font-size: 12.5px;
+}
+
+.file-preview-card small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.file-preview-card pre {
+  min-height: 0;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  color: var(--text-2);
+  font: 11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.file-empty {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 4px;
+  padding: 20px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.file-empty strong {
+  color: var(--text);
+  font-size: 13px;
+}
 
 .api-form { display: grid; gap: 10px; }
 .api-form label {

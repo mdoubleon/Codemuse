@@ -15,6 +15,11 @@ const state = {
   config: null,
   providers: [],
   providerReadiness: [],
+  workspacePath: "",
+  fileTree: {},
+  expandedDirs: new Set(["."]),
+  selectedFile: null,
+  filePreview: null,
   busy: false,
   lastError: "",
   toastTimer: 0,
@@ -40,6 +45,7 @@ const SUGGESTS = [
 
 const NAV_TO_TAB = {
   approvals: "approvals",
+  files: "files",
   memory: "memory",
   repo: "repo",
   api: "api",
@@ -58,7 +64,7 @@ async function boot() {
   preloadMascots();
   selectTab(state.activeTab, { initial: true });
   startAvatarLoop();
-  setPromptFeedback("正在连接 CodeMuse 后端…");
+  setPromptFeedback("正在连接 CodeMuse 后端...");
   await refreshWorkspace();
   if (!state.sessionId) {
     await createSession();
@@ -76,6 +82,7 @@ function cacheNodes() {
     "prompt-form", "prompt", "send", "prompt-feedback",
     "checkpoint", "stop-button", "approvals", "approval-count", "checkpoints",
     "checkpoint-count", "memory-form", "memory-query", "memory-index", "memory-results",
+    "workspace-form", "workspace-path", "workspace-apply", "file-refresh", "file-tree", "file-preview",
     "repo-refresh", "repo-status", "repo-cache", "report-refresh", "report-summary",
     "api-form", "api-refresh", "api-status", "api-provider", "api-model",
     "api-base-url", "api-key-env", "provider-list", "capabilities",
@@ -102,6 +109,11 @@ function bindEvents() {
   nodes.checkpoint.addEventListener("click", e => withButton(e.currentTarget, createCheckpoint()));
   nodes.stopButton.addEventListener("click", e => withButton(e.currentTarget, cancelRun()));
   nodes.toggleTerminal.addEventListener("click", () => toggleTerminal());
+  nodes.workspaceForm.addEventListener("submit", e => {
+    e.preventDefault();
+    withButton(nodes.workspaceApply, switchWorkspace());
+  });
+  nodes.fileRefresh.addEventListener("click", e => withButton(e.currentTarget, refreshFiles(true).then(() => showToast("文件树已刷新", "success"))));
 
   nodes.repoRefresh.addEventListener("click", e => withButton(e.currentTarget, refreshRepo().then(() => { render(); showToast("仓库状态已刷新", "success"); })));
   nodes.reportRefresh.addEventListener("click", e => withButton(e.currentTarget, refreshReport().then(() => { render(); showToast("评测报告已刷新", "success"); })));
@@ -179,6 +191,18 @@ function bindEvents() {
       const action = approval.getAttribute("data-approval-action") || "";
       const id = approval.getAttribute("data-approval-id") || "";
       withButton(approval, handleApproval(id, action));
+      return;
+    }
+    const fileToggle = target.closest("[data-file-toggle]");
+    if (fileToggle) {
+      const path = fileToggle.getAttribute("data-file-toggle") || ".";
+      withButton(fileToggle, toggleDirectory(path));
+      return;
+    }
+    const fileOpen = target.closest("[data-file-open]");
+    if (fileOpen) {
+      const path = fileOpen.getAttribute("data-file-open") || "";
+      readFilePreview(path).catch(showError);
       return;
     }
     const rewind = target.closest("[data-rewind-id]");
@@ -266,21 +290,84 @@ async function request(path, options = {}) {
 }
 
 async function refreshWorkspace() {
-  const [health, capabilities, sessions] = await Promise.all([
+  const [health, workspace, capabilities, sessions] = await Promise.all([
     request("/api/health"),
+    request("/api/workspace"),
     request("/api/capabilities"),
     request("/api/sessions")
   ]);
-  nodes.workspace.textContent = health.workspace || "当前工作区";
+  state.workspacePath = workspace.workspace || health.workspace || "";
+  nodes.workspace.textContent = state.workspacePath || "当前工作区";
+  setInputValue(nodes.workspacePath, state.workspacePath);
   state.capabilities = capabilities.capabilities || [];
   state.sessions = sessions.sessions || [];
   if (!state.sessionId && state.sessions.length > 0) {
     state.sessionId = state.sessions[0].session_id;
   }
-  await Promise.all([refreshSession(), refreshRepo(), refreshReport(), refreshApiConfig()]);
+  await Promise.all([refreshSession(), refreshFiles(false), refreshRepo(), refreshReport(), refreshApiConfig()]);
   render();
 }
 
+async function switchWorkspace() {
+  const workspace = nodes.workspacePath.value.trim();
+  if (!workspace) {
+    showToast("先输入要切换的工作区路径");
+    return;
+  }
+  const payload = await request("/api/workspace/switch", { method: "POST", body: { workspace } });
+  state.workspacePath = payload.workspace || workspace;
+  state.sessionId = "";
+  state.cursor = 0;
+  state.events = [];
+  state.localEvents = [];
+  state.sessions = [];
+  state.snapshot = null;
+  state.approvals = [];
+  state.checkpoints = [];
+  state.fileTree = {};
+  state.expandedDirs = new Set(["."]);
+  state.selectedFile = null;
+  state.filePreview = null;
+  state.renderCache = {};
+  await refreshWorkspace();
+  await createSession();
+  showToast(`已切换工作区：${state.workspacePath}`, "success");
+}
+
+async function refreshFiles(force) {
+  if (force) state.fileTree = {};
+  if (!state.fileTree["."] || force) {
+    await loadDirectory(".");
+  }
+  renderFiles();
+}
+
+async function loadDirectory(path) {
+  const key = normalizeTreePath(path);
+  const payload = await request(`/api/files/tree?path=${encodeURIComponent(key)}`);
+  state.fileTree[key] = payload;
+  state.expandedDirs.add(key);
+  return payload;
+}
+
+async function toggleDirectory(path) {
+  const key = normalizeTreePath(path);
+  if (state.expandedDirs.has(key)) {
+    state.expandedDirs.delete(key);
+  } else {
+    if (!state.fileTree[key]) await loadDirectory(key);
+    state.expandedDirs.add(key);
+  }
+  renderFiles();
+}
+
+async function readFilePreview(path) {
+  if (!path) return;
+  const payload = await request(`/api/files/read?path=${encodeURIComponent(path)}`);
+  state.selectedFile = path;
+  state.filePreview = payload;
+  renderFiles();
+}
 async function createSession() {
   const created = await request("/api/sessions", { method: "POST", body: {} });
   state.sessionId = created.session_id;
@@ -370,7 +457,7 @@ async function sendPrompt() {
   state.localEvents.push({ type: "local_user_prompt", message: prompt, timestamp: Date.now() / 1000 });
   nodes.prompt.value = "";
   autoGrow(nodes.prompt);
-  setPromptFeedback("已发送，等待 Agent…");
+  setPromptFeedback("正在交给 Agent...");
   render();
   pollInterval = POLL_FAST;
 
@@ -406,7 +493,7 @@ async function createCheckpoint() {
     body: { label: "web checkpoint" }
   });
   await poll();
-  showToast("检查点已创建", "success");
+  showToast("已创建检查点", "success");
 }
 
 async function rewindCheckpoint(checkpointId) {
@@ -416,7 +503,7 @@ async function rewindCheckpoint(checkpointId) {
     body: { checkpoint_id: checkpointId }
   });
   await poll();
-  showToast("已回退到检查点", "success");
+  showToast("已回滚到检查点", "success");
 }
 
 async function cancelRun() {
@@ -431,7 +518,7 @@ async function cancelRun() {
   });
   await poll();
   const drained = result?.drained_jobs || 0;
-  showToast(drained ? `已请求取消，并清空 ${drained} 个排队任务` : "已请求取消，等待 Agent 收尾", "success");
+  showToast(drained ? `已取消任务，并清理 ${drained} 个队列任务` : "已请求中断 Agent 任务", "success");
 }
 
 async function refreshMemoryIndex() {
@@ -439,23 +526,23 @@ async function refreshMemoryIndex() {
   const index = payload.index || {};
   state.localEvents.push({
     type: "memory_index_refreshed",
-    message: `记忆索引已重建：${index.chunk_count || 0} 个片段，${index.file_count || 0} 个文件。`,
+    message: `已重建记忆索引：${index.chunk_count || 0} 个片段，${index.file_count || 0} 个文件`,
     timestamp: Date.now() / 1000
   });
   render();
-  showToast("记忆索引已重建", "success");
+  showToast("记忆索引已刷新", "success");
 }
 
 async function searchMemory() {
   const query = nodes.memoryQuery.value.trim();
   if (!query) {
-    showToast("先输入要搜索的记忆关键词");
+    showToast("请输入记忆搜索关键词");
     return;
   }
   const payload = await request(`/api/memory/search?query=${encodeURIComponent(query)}&limit=6`);
   state.memoryHits = payload.hits || [];
   renderMemory();
-  showToast(`找到 ${state.memoryHits.length} 条记忆`, "success");
+  showToast(`找到 ${state.memoryHits.length} 条结果`, "success");
 }
 
 async function refreshRepo() {
@@ -485,7 +572,7 @@ async function refreshApiConfig() {
 async function saveApiConfig() {
   const apiKeyEnv = nodes.apiKeyEnv.value.trim();
   if (looksLikeSecret(apiKeyEnv)) {
-    showToast("这里要填环境变量名，例如 CODEMUSE_API_KEY，不要填真实 API Key。");
+    showToast("这里填写环境变量名，比如 CODEMUSE_API_KEY，不要直接粘贴 API Key。");
     nodes.apiKeyEnv.focus();
     return;
   }
@@ -500,7 +587,7 @@ async function saveApiConfig() {
   }
   await refreshApiConfig();
   renderApiConfig();
-  showToast("模型配置已保存。真实 API Key 请放在后端进程环境变量中。", "success");
+  showToast("模型配置已保存。API Key 请通过环境变量提供。", "success");
 }
 
 async function runCommand(command) {
@@ -514,12 +601,12 @@ async function runCommand(command) {
     await createSession();
   } else if (command === "/refresh") {
     await refreshWorkspace();
-    showToast("已刷新工作台", "success");
+    showToast("工作台已刷新", "success");
   } else {
     nodes.prompt.value = command;
     autoGrow(nodes.prompt);
     nodes.prompt.focus();
-    setPromptFeedback("命令已放入输入框，按 Enter 发送。");
+    setPromptFeedback("已放入输入框，按 Enter 发送");
   }
   nodes.commandInput.value = "";
 }
@@ -532,6 +619,7 @@ function render() {
   renderTerminal();
   renderApprovals();
   renderCheckpoints();
+  renderFiles();
   renderMemory();
   renderRepo();
   renderReport();
@@ -565,8 +653,8 @@ function renderShell() {
   setText(nodes.statSession, state.sessionId ? shortId(state.sessionId) : "未创建");
   setText(nodes.phaseState, phase);
   setText(nodes.queueCount, pending);
-  setText(nodes.runtimeStatus, running ? "Agent 工作中" : "Agent 空闲");
-  setText(nodes.agentMotionLabel, running ? "调用工具或等待审批" : "等待下一条任务");
+  setText(nodes.runtimeStatus, running ? "Agent 运行中" : "Agent 空闲");
+  setText(nodes.agentMotionLabel, running ? "正在处理当前任务" : "等待下一条任务");
   setText(nodes.statusPill, status);
 
   setClass(nodes.statusPill, "running", running);
@@ -583,7 +671,7 @@ function renderShell() {
   setText(nodes.failedCount, failedSessions);
   setText(nodes.approvalCount, state.approvals.length);
   setText(nodes.checkpointCount, state.checkpoints.length);
-  setText(nodes.navApprovalHint, state.approvals.length ? `${state.approvals.length} 个待处理` : "无待审批");
+  setText(nodes.navApprovalHint, state.approvals.length ? `${state.approvals.length} 个待审批` : "无需审批");
   setText(nodes.navSessionsHint, `${total} 个会话`);
   if (nodes.navApprovalBadge) {
     if (state.approvals.length) nodes.navApprovalBadge.removeAttribute("hidden");
@@ -703,8 +791,8 @@ function welcomeHtml() {
     <div class="welcome-mark" aria-hidden="true">
       <svg viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M12 2 4 7v10l8 5 8-5V7Zm0 2.3 5.5 3.4v8.6L12 19.7l-5.5-3.4V7.7Zm0 3.7L8 10.4v3.2l4 2.4 4-2.4v-3.2Z"/></svg>
     </div>
-    <h2>准备开始一个 CodeMuse 回合</h2>
-    <p>输入任务后，主对话区只显示你和模型的对话；工具调用、审批和运行事件会收起到详情里。</p>
+    <h2>把任务交给 CodeMuse 吧</h2>
+    <p>可以查看文件、检索记忆、分析仓库，也可以直接描述你想修改的代码。</p>
     <div class="welcome-suggests">${cards}</div>
   </div>`;
 }
@@ -718,7 +806,7 @@ function renderConversationItem(event) {
   if (isAssistantEvent(type)) {
     return messageHtml("assistant", "CodeMuse", text, "CM", event.timestamp);
   }
-  return messageHtml("error", "错误", text || detailsText(event.details) || "操作失败", "!", event.timestamp);
+  return messageHtml("error", "错误", text || detailsText(event.details) || "暂无详情", "!", event.timestamp);
 }
 
 function renderConversationDetails(items) {
@@ -727,7 +815,7 @@ function renderConversationDetails(items) {
   const errorCount = items.filter(event => event.is_error || String(event.type || "").endsWith("_failed")).length;
   return `<details class="run-details">
     <summary>
-      <span>运行详情</span>
+      <span>执行细节</span>
       <small>${items.length} 个事件 · ${toolCount} 个工具 · ${approvalCount} 个审批 · ${errorCount} 个错误</small>
     </summary>
     <div class="run-event-list">${items.map(renderDetailItem).join("")}</div>
@@ -738,7 +826,7 @@ function renderDetailItem(event) {
   const type = event.type || "";
   const text = event.message || event.delta || "";
   const title = event.tool_name ? `${eventLabel(type)} / ${toolLabel(event.tool_name)}` : eventLabel(type);
-  const details = [text, detailsText(event.details)].filter(Boolean).join("\n\n") || "事件已记录。";
+  const details = [text, detailsText(event.details)].filter(Boolean).join("\n\n") || "暂无详情";
   const cls = event.is_error || type.endsWith("_failed") ? " error" : event.type === "approval_required" ? " warning" : "";
   return `<article class="run-event${cls}">
     <header><strong>${escapeHtml(title)}</strong><time>${escapeHtml(formatTime(event.timestamp))}</time></header>
@@ -756,7 +844,7 @@ function messageHtml(kind, label, text, avatar, timestamp) {
     <div class="message-avatar">${escapeHtml(avatar)}</div>
     <div class="bubble">
       <span class="bubble-label">${escapeHtml(label)}${time}</span>
-      <p>${escapeHtml(text || "已完成。")}</p>
+      <p>${escapeHtml(text || "暂无内容")}</p>
     </div>
   </article>`;
 }
@@ -786,7 +874,7 @@ function renderApprovals() {
   if (shouldSkip("approvals", fp)) return;
 
   if (!state.approvals.length) {
-    nodes.approvals.innerHTML = emptyHtml("当前没有等待审批的操作。");
+    nodes.approvals.innerHTML = emptyHtml("当前没有待审批操作");
     return;
   }
   nodes.approvals.innerHTML = state.approvals.map(item => {
@@ -794,7 +882,7 @@ function renderApprovals() {
     return `<article class="item-card">
       <strong>${escapeHtml(toolLabel(item.tool_name || "unknown"))}</strong>
       <small>${escapeHtml(id)}</small>
-      <p>${escapeHtml(item.reason || summarizeDetails(item.details) || "该操作需要确认后继续。")}</p>
+      <p>${escapeHtml(item.reason || summarizeDetails(item.details) || "该操作需要你确认后继续")}</p>
       <div class="approval-actions">
         <button data-approval-action="approve" data-approval-id="${escapeHtml(id)}" type="button">批准</button>
         <button data-approval-action="reject" data-approval-id="${escapeHtml(id)}" type="button">拒绝</button>
@@ -814,9 +902,75 @@ function renderCheckpoints() {
   nodes.checkpoints.innerHTML = state.checkpoints.slice(0, 10).map(item => {
     const id = item.checkpoint_id || "";
     return `<article class="item-card checkpoint-row">
-      <span><strong>${escapeHtml(shortId(id))}</strong><small>${escapeHtml(item.label || "检查点")}</small></span>
-      <button data-rewind-id="${escapeHtml(id)}" type="button">回退</button>
+      <span><strong>${escapeHtml(shortId(id))}</strong><small>${escapeHtml(item.label || "未命名")}</small></span>
+      <button data-rewind-id="${escapeHtml(id)}" type="button">回滚</button>
     </article>`;
+  }).join("");
+}
+
+function renderFiles() {
+  if (!nodes.fileTree || !nodes.filePreview) return;
+  const fp = fingerprint({
+    tree: Object.fromEntries(Object.entries(state.fileTree).map(([key, value]) => [key, (value.entries || []).map(item => [item.path, item.kind, item.size])])),
+    expanded: Array.from(state.expandedDirs).sort(),
+    selected: state.selectedFile,
+    preview: state.filePreview && [state.filePreview.path, state.filePreview.size, state.filePreview.content]
+  });
+  if (shouldSkip("files", fp)) return;
+
+  const root = state.fileTree["."];
+  if (!root) {
+    nodes.fileTree.innerHTML = emptyHtml("正在加载文件树");
+  } else {
+    nodes.fileTree.innerHTML = renderDirectoryEntries(".", 0);
+  }
+
+  if (!state.filePreview) {
+    nodes.filePreview.innerHTML = `<div class="file-empty"><strong>选择一个文件</strong><span>点击左侧文件树中的文件后，这里会显示内容预览。</span></div>`;
+    return;
+  }
+  const preview = state.filePreview;
+  const content = preview.binary ? preview.content : String(preview.content || "");
+  nodes.filePreview.innerHTML = `<article class="file-preview-card">
+    <header>
+      <div>
+        <strong>${escapeHtml(preview.name || preview.path || "file")}</strong>
+        <small>${escapeHtml(preview.path || "")} · ${escapeHtml(formatBytes(preview.size || 0))}</small>
+      </div>
+    </header>
+    <pre>${escapeHtml(content || "空文件")}</pre>
+  </article>`;
+}
+
+function renderDirectoryEntries(path, depth) {
+  const key = normalizeTreePath(path);
+  const payload = state.fileTree[key];
+  const entries = payload?.entries || [];
+  if (!entries.length) {
+    return depth === 0 ? emptyHtml("当前目录没有可显示的文件") : "";
+  }
+  return entries.map(item => {
+    const isDir = item.kind === "directory";
+    const expanded = state.expandedDirs.has(item.path);
+    const selected = state.selectedFile === item.path ? " selected" : "";
+    const indent = Math.min(depth * 14, 84);
+    if (isDir) {
+      const children = expanded ? renderDirectoryEntries(item.path, depth + 1) : "";
+      return `<div class="file-branch">
+        <button class="file-row directory${expanded ? " expanded" : ""}" data-file-toggle="${escapeHtml(item.path)}" style="--indent:${indent}px" type="button">
+          <span class="file-caret">${expanded ? "▾" : "▸"}</span>
+          <span class="file-icon">📁</span>
+          <span class="file-name">${escapeHtml(item.name)}</span>
+        </button>
+        ${children ? `<div class="file-children">${children}</div>` : ""}
+      </div>`;
+    }
+    return `<button class="file-row file${selected}" data-file-open="${escapeHtml(item.path)}" style="--indent:${indent}px" type="button">
+      <span class="file-caret"></span>
+      <span class="file-icon">📄</span>
+      <span class="file-name">${escapeHtml(item.name)}</span>
+      <span class="file-size">${escapeHtml(formatBytes(item.size || 0))}</span>
+    </button>`;
   }).join("");
 }
 
@@ -825,7 +979,7 @@ function renderMemory() {
   if (shouldSkip("memory", fp)) return;
 
   if (!state.memoryHits.length) {
-    nodes.memoryResults.innerHTML = emptyHtml("输入关键词搜索记忆，或先点重建索引。");
+    nodes.memoryResults.innerHTML = emptyHtml("输入关键词搜索记忆，或先点击重建索引。");
     return;
   }
   nodes.memoryResults.innerHTML = state.memoryHits.map(hit => {
@@ -850,21 +1004,21 @@ function renderRepo() {
     const changed = Array.isArray(state.repoStatus.status) ? state.repoStatus.status.length : 0;
     nodes.repoStatus.textContent = `${state.repoStatus.branch || "detached"} · ${state.repoStatus.commit || ""} · ${changed} 个变更`;
   } else {
-    nodes.repoStatus.textContent = "当前工作区不是 Git 仓库";
+    nodes.repoStatus.textContent = "当前目录不是 Git 仓库";
   }
   nodes.repoCache.innerHTML = state.repoCache.length
     ? state.repoCache.slice(0, 4).map(item => `<article class="item-card">
         <strong>${escapeHtml(item.repo_id || item.source || "import")}</strong>
         <small>${escapeHtml(item.imported_path || item.destination || "")}</small>
       </article>`).join("")
-    : emptyHtml("暂无导入缓存");
+    : emptyHtml("暂无导入记录");
 }
 
 function renderReport() {
   const fp = fingerprint(state.report);
   if (shouldSkip("report", fp)) return;
   if (!state.report || !state.report.exists || !state.report.report) {
-    nodes.reportSummary.textContent = "未找到";
+    nodes.reportSummary.textContent = "暂无";
     return;
   }
   const report = state.report.report;
@@ -887,19 +1041,19 @@ function renderApiConfig() {
 
   const current = readinessFor(nodes.apiProvider.value || "fake");
   nodes.apiStatus.textContent = current
-    ? `${providerLabel(current.name)}：${current.ready ? "已就绪" : "未就绪"}${current.api_key_env ? `，读取 ${current.api_key_env}` : ""}`
-    : `${providerLabel(nodes.apiProvider.value || "fake")}：本地配置`;
+    ? `${providerLabel(current.name)}：${current.ready ? "已就绪" : "未就绪"}${current.api_key_env ? `，环境变量 ${current.api_key_env}` : ""}`
+    : `${providerLabel(nodes.apiProvider.value || "fake")} 尚未检查`;
 
   nodes.providerList.innerHTML = state.providerReadiness.length
     ? state.providerReadiness.map(item => {
       const cls = item.ready ? "ok" : item.implemented === false ? "err" : "warn";
-      const text = item.ready ? "就绪" : item.implemented === false ? "未实现" : "缺配置";
+      const text = item.ready ? "可用" : item.implemented === false ? "未实现" : "未就绪";
       return `<article class="item-card">
         <strong>${escapeHtml(providerLabel(item.name))} <span class="badge ${cls}">${escapeHtml(text)}</span></strong>
-        <small>${escapeHtml(item.model || item.api_key_env || "本地模拟")}</small>
+        <small>${escapeHtml(item.model || item.api_key_env || "未配置")}</small>
       </article>`;
     }).join("")
-    : emptyHtml("暂无 Provider 状态");
+    : emptyHtml("暂无 Provider 信息");
 }
 
 function renderProviderOptions() {
@@ -921,7 +1075,7 @@ function renderCapabilities() {
   if (shouldSkip("capabilities", fp)) return;
 
   if (!state.capabilities.length) {
-    nodes.capabilities.innerHTML = emptyHtml("暂无能力数据");
+    nodes.capabilities.innerHTML = emptyHtml("暂无可用能力");
     return;
   }
   nodes.capabilities.innerHTML = state.capabilities.slice(0, 28).map(item => {
@@ -933,6 +1087,7 @@ function renderCapabilities() {
   }).join("");
 }
 
+/* ============ HELPERS ============ */
 /* ============ HELPERS ============ */
 function applyProviderDefaults() {
   const ready = readinessFor(nodes.apiProvider.value);
@@ -1013,6 +1168,19 @@ function emptyHtml(text) {
   return `<div class="empty">${escapeHtml(text)}</div>`;
 }
 
+function normalizeTreePath(path) {
+  const clean = String(path || ".").replaceAll("\\", "/").replace(/^\/+/, "").replace(/\/+$/, "");
+  return clean && clean !== "." ? clean : ".";
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (!Number.isFinite(size) || size <= 0) return "0 B";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function detailsText(details) {
   if (!details || typeof details !== "object" || Object.keys(details).length === 0) return "";
   const normalized = {};
@@ -1022,7 +1190,7 @@ function detailsText(details) {
     else normalized[key] = value;
   }
   const text = JSON.stringify(normalized, null, 2);
-  return text.length > 1200 ? `${text.slice(0, 1200)}\n…` : text;
+  return text.length > 1200 ? `${text.slice(0, 1200)}\n...` : text;
 }
 
 function summarizeDetails(details) {
@@ -1049,58 +1217,105 @@ function formatTime(value) {
 }
 
 function phaseLabel(value) {
-  const labels = { idle: "Idle", running: "运行中", planning: "规划中", executing: "执行中", awaiting_approval: "等待审批", waiting_approval: "等待审批", completed: "已完成", failed: "失败", cancelled: "已取消" };
+  const labels = {
+    idle: "Idle",
+    running: "运行中",
+    planning: "规划中",
+    executing: "执行中",
+    awaiting_approval: "等待审批",
+    waiting_approval: "等待审批",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消"
+  };
   return labels[value] || value || "Idle";
 }
 
 function eventLabel(value) {
   const labels = {
-    ui_info: "界面提示", prompt_queued: "任务排队", prompt_started: "开始执行",
-    prompt_completed: "执行完成", prompt_failed: "执行失败",
-    approve_queued: "审批排队", approve_started: "开始批准", approve_completed: "批准完成",
-    reject_queued: "拒绝排队", reject_started: "开始拒绝", reject_completed: "拒绝完成",
-    checkpoint_queued: "检查点排队", checkpoint_started: "创建检查点", checkpoint_completed: "检查点完成",
-    rewind_queued: "回退排队", rewind_started: "开始回退", rewind_completed: "回退完成",
-    tool_call: "调用工具", tool_result: "工具结果", tool_error: "工具失败",
-    approval_required: "需要审批", approval_rejected: "已拒绝", approval_stale: "审批已过期", approval_invalid: "审批无效",
-    checkpoint_created: "检查点已创建", checkpoint_rewound: "检查点已恢复",
-    assistant_delta: "模型输出", assistant_message: "助手回复", message: "助手回复",
-    memory_index_refreshed: "记忆索引刷新",
-    cancel_requested: "已请求取消", agent_cancelled: "Agent 已取消",
-    agent_start: "Agent 启动", agent_end: "Agent 结束",
-    turn_start: "回合开始", turn_end: "回合结束",
-    prompt_cancelled: "任务已取消", approve_cancelled: "审批已取消",
-    reject_cancelled: "拒绝已取消", checkpoint_cancelled: "检查点已取消",
-    rewind_cancelled: "回退已取消"
+    ui_info: "界面信息",
+    prompt_queued: "任务排队",
+    prompt_started: "任务开始",
+    prompt_completed: "任务完成",
+    prompt_failed: "任务失败",
+    approve_queued: "审批排队",
+    approve_started: "审批开始",
+    approve_completed: "审批完成",
+    reject_queued: "拒绝排队",
+    reject_started: "拒绝开始",
+    reject_completed: "拒绝完成",
+    checkpoint_queued: "检查点排队",
+    checkpoint_started: "检查点开始",
+    checkpoint_completed: "检查点完成",
+    rewind_queued: "回滚排队",
+    rewind_started: "回滚开始",
+    rewind_completed: "回滚完成",
+    tool_call: "调用工具",
+    tool_result: "工具结果",
+    tool_error: "工具错误",
+    approval_required: "需要审批",
+    approval_rejected: "审批拒绝",
+    approval_stale: "审批已过期",
+    approval_invalid: "审批无效",
+    checkpoint_created: "检查点已创建",
+    checkpoint_rewound: "检查点已回滚",
+    assistant_delta: "助手输出",
+    assistant_message: "助手消息",
+    message: "消息",
+    memory_index_refreshed: "记忆索引已刷新",
+    cancel_requested: "已请求取消",
+    agent_cancelled: "Agent 已取消",
+    agent_start: "Agent 开始",
+    agent_end: "Agent 结束",
+    turn_start: "回合开始",
+    turn_end: "回合结束",
+    prompt_cancelled: "任务已取消",
+    approve_cancelled: "审批已取消",
+    reject_cancelled: "拒绝已取消",
+    checkpoint_cancelled: "检查点已取消",
+    rewind_cancelled: "回滚已取消"
   };
-  return labels[value] || value || "事件";
+  return labels[value] || value || "未知";
 }
 
 function toolLabel(value) {
   const labels = {
-    list_files: "列出文件", read_file: "读取文件", write_file: "写入文件",
-    replace_text: "替换文本", apply_patch: "应用补丁", search_text: "搜索文本",
-    save_project_memory: "保存项目记忆", search_project_memory: "搜索项目记忆",
-    inspect_repo: "分析仓库", inspect_git_status: "检查 Git 状态",
-    import_repo: "导入仓库", web_fetch_preview: "网页预览",
-    delegate_to_subagent: "委派子 Agent", run_extension: "运行扩展"
+    list_files: "列出文件",
+    read_file: "读取文件",
+    write_file: "写入文件",
+    replace_text: "替换文本",
+    apply_patch: "应用补丁",
+    search_text: "搜索文本",
+    save_project_memory: "保存项目记忆",
+    search_project_memory: "搜索项目记忆",
+    inspect_repo: "检查仓库",
+    inspect_git_status: "检查 Git 状态",
+    import_repo: "导入仓库",
+    web_fetch_preview: "网页预览",
+    delegate_to_subagent: "委派 Agent",
+    run_extension: "运行扩展"
   };
-  return labels[value] || value || "能力";
+  return labels[value] || value || "未知工具";
 }
 
 function kindLabel(value) {
   const labels = {
-    builtin_tool: "内置工具", repo_tool: "仓库工具", memory_tool: "记忆工具",
-    web_tool: "网页工具", subagent_tool: "子 Agent", mcp_tool: "MCP 工具",
-    skill: "技能", extension: "扩展"
+    builtin_tool: "内置工具",
+    repo_tool: "仓库工具",
+    memory_tool: "记忆工具",
+    web_tool: "网页工具",
+    subagent_tool: "子 Agent",
+    mcp_tool: "MCP 工具",
+    skill: "技能",
+    extension: "扩展"
   };
-  return labels[value] || value || "能力";
+  return labels[value] || value || "未知类型";
 }
 
 function riskLabel(value) {
   if (value === "high") return "高风险";
-  if (value === "medium") return "需确认";
-  return "安全";
+  if (value === "medium") return "中风险";
+  return "低风险";
 }
 
 function providerLabel(value) {
@@ -1124,3 +1339,4 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+

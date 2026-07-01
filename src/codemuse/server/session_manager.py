@@ -262,6 +262,23 @@ class WebSessionManager:
         self._handles: dict[str, SessionHandle] = {}
         self._lock = threading.Lock()
 
+    def set_default_workspace(self, workspace: Path) -> Path:
+        """切换 Web 端后续新会话和全局 API 使用的默认工作区。"""
+        resolved = workspace.expanduser().resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Workspace does not exist: {resolved}")
+        if not resolved.is_dir():
+            raise NotADirectoryError(f"Workspace is not a directory: {resolved}")
+        with self._lock:
+            if resolved == self.default_workspace:
+                return self.default_workspace
+            handles = list(self._handles.values())
+            self._handles = {}
+            self.default_workspace = resolved
+        for handle in handles:
+            handle.close()
+        return resolved
+
     def create_session(self, *, workspace: Path | None = None) -> SessionHandle:
         """为指定 workspace 构建 AgentRuntime，并用 SessionHandle 管理它。"""
         runtime = build_agent((workspace or self.default_workspace).resolve())

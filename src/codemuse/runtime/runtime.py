@@ -41,7 +41,7 @@ class AgentRuntime:
         checkpoint_store: CheckpointStore | None = None,
         timeline_store: TimelineStore | None = None,
         policy_evaluator: ToolPolicyEvaluator | None = None,
-        max_turns: int = 8,
+        max_turns: int = 15,
     ) -> None:
         """注入模型、工具注册表、存储和可选记忆/审批/检查点组件，恢复会话状态。"""
         self.workspace = workspace.resolve()

@@ -11,6 +11,7 @@ evals/reports/
 .server-*.log
 .server-*.err.log
 .server-*.out.log
+.codemuse-server.pid
 dist/
 build/
 *.egg-info/

@@ -14,6 +14,23 @@ from codemuse.app.bootstrap import create_capability_catalog
 from codemuse.server.session_manager import WebSessionManager
 from codemuse.tools.repo_git import inspect_git_status, list_repo_cache
 
+_IGNORED_BROWSER_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".data",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    ".pytest_cache",
+    ".mypy_cache",
+}
+_TEXT_PREVIEW_LIMIT = 256 * 1024
+_TREE_CHILD_LIMIT = 400
+
 _STATIC_ROUTES = {
     "/": "index.html",
     "/index.html": "index.html",
@@ -46,6 +63,24 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
         try:
             if parts == ["health"]:
                 self._send_json({"ok": True, "workspace": str(self.server.manager.default_workspace)})
+                return
+            if parts == ["workspace"]:
+                workspace = self.server.manager.default_workspace
+                self._send_json(_workspace_payload(workspace))
+                return
+            if parts == ["files", "tree"]:
+                query = parse_qs(parsed.query)
+                raw_path = _string_query(query, "path", default=".")
+                path = _resolve_workspace_path(self.server.manager.default_workspace, raw_path)
+                self._send_json(_directory_payload(self.server.manager.default_workspace, path))
+                return
+            if parts == ["files", "read"]:
+                query = parse_qs(parsed.query)
+                raw_path = _string_query(query, "path", default="")
+                if not raw_path:
+                    raise ValueError("path is required.")
+                path = _resolve_workspace_path(self.server.manager.default_workspace, raw_path)
+                self._send_json(_file_preview_payload(self.server.manager.default_workspace, path))
                 return
             if parts == ["capabilities"]:
                 query = parse_qs(parsed.query)
@@ -116,6 +151,13 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
         if payload is None:
             return
         try:
+            if parts == ["workspace", "switch"]:
+                workspace_value = str(payload.get("workspace") or "").strip()
+                if not workspace_value:
+                    raise ValueError("workspace is required.")
+                workspace = self.server.manager.set_default_workspace(Path(workspace_value))
+                self._send_json(_workspace_payload(workspace))
+                return
             if parts == ["sessions"]:
                 workspace_value = str(payload.get("workspace") or "").strip()
                 workspace = Path(workspace_value) if workspace_value else None
@@ -305,6 +347,110 @@ def _resolve_workspace_path(workspace: Path, raw_path: str) -> Path:
     if root not in resolved.parents and resolved != root:
         raise PermissionError(f"Path is outside workspace: {raw_path}")
     return resolved
+
+
+def _workspace_payload(workspace: Path) -> dict[str, object]:
+    """生成前端工作区选择器需要的当前目录摘要。"""
+    resolved = workspace.resolve()
+    return {
+        "workspace": str(resolved),
+        "name": resolved.name or str(resolved),
+        "exists": resolved.exists(),
+        "is_dir": resolved.is_dir(),
+    }
+
+
+def _directory_payload(workspace: Path, directory: Path) -> dict[str, object]:
+    """列出 workspace 内指定目录的一层子项，供前端文件树按需展开。"""
+    root = workspace.resolve()
+    current = directory.resolve()
+    if not current.is_dir():
+        raise NotADirectoryError(f"Not a directory: {_relative_path(root, current)}")
+    entries = []
+    skipped = 0
+    for child in sorted(current.iterdir(), key=_file_browser_sort_key):
+        name = child.name
+        if child.is_dir() and name in _IGNORED_BROWSER_DIRS:
+            skipped += 1
+            continue
+        if len(entries) >= _TREE_CHILD_LIMIT:
+            skipped += 1
+            continue
+        try:
+            stat = child.stat()
+            is_dir = child.is_dir()
+        except OSError:
+            skipped += 1
+            continue
+        entries.append(
+            {
+                "name": name,
+                "path": _relative_path(root, child),
+                "kind": "directory" if is_dir else "file",
+                "size": 0 if is_dir else stat.st_size,
+                "modified": stat.st_mtime,
+            }
+        )
+    return {
+        "workspace": str(root),
+        "path": _relative_path(root, current) or ".",
+        "entries": entries,
+        "skipped": skipped,
+    }
+
+
+def _file_preview_payload(workspace: Path, path: Path) -> dict[str, object]:
+    """读取 workspace 内文本文件的前端预览内容，并限制最大读取体积。"""
+    root = workspace.resolve()
+    target = path.resolve()
+    if not target.is_file():
+        raise FileNotFoundError(f"Not a file: {_relative_path(root, target)}")
+    stat = target.stat()
+    base = {
+        "workspace": str(root),
+        "path": _relative_path(root, target),
+        "name": target.name,
+        "size": stat.st_size,
+        "modified": stat.st_mtime,
+    }
+    if stat.st_size > _TEXT_PREVIEW_LIMIT:
+        return {
+            **base,
+            "truncated": True,
+            "binary": False,
+            "content": f"文件超过 {_TEXT_PREVIEW_LIMIT // 1024} KB，暂不在页面预览。",
+        }
+    data = target.read_bytes()
+    if b"\x00" in data[:4096]:
+        return {
+            **base,
+            "truncated": False,
+            "binary": True,
+            "content": "二进制文件不能直接预览。",
+        }
+    try:
+        content = data.decode("utf-8")
+    except UnicodeDecodeError:
+        content = data.decode("utf-8", errors="replace")
+    return {
+        **base,
+        "truncated": False,
+        "binary": False,
+        "content": content,
+    }
+
+
+def _file_browser_sort_key(path: Path) -> tuple[int, str]:
+    """让目录在文件前，并按名称稳定排序。"""
+    return (0 if path.is_dir() else 1, path.name.lower())
+
+
+def _relative_path(workspace: Path, path: Path) -> str:
+    """把绝对路径转换成 workspace 内相对路径。"""
+    try:
+        return path.resolve().relative_to(workspace.resolve()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _latest_report_payload(workspace: Path) -> dict[str, object]:
