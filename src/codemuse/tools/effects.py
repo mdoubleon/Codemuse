@@ -542,7 +542,7 @@ def _changed_patch_preview_fields(stored_preview: dict[str, Any], current_previe
     current_changes = current_preview.get("changes") or []
     if len(stored_changes) != len(current_changes):
         return ["changes_count"]
-    for index, (stored_change, current_change) in enumerate(zip(stored_changes, current_changes, strict=True)):
+    for index, (stored_change, current_change) in enumerate(zip(stored_changes, current_changes)):
         for field in ["relative_path", "exists", "before_chars", "before_sha256"]:
             if stored_change.get(field) != current_change.get(field):
                 changed_fields.append(f"changes[{index}].{field}")

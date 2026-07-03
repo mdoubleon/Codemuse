@@ -289,10 +289,69 @@ class AgentRuntime:
     def _messages_for_model(self) -> list[ChatMessage]:
         """构造发给模型的上下文，并在调用前注入相关长期记忆。"""
         messages = [ChatMessage.text("system", self.state.system_prompt)]
-        messages.extend(self.state.messages[-20:])
+        messages.extend(self._tool_protocol_safe_history(limit=20))
         if self.memory_provider is not None:
             messages = self.memory_provider.transform_context(self.state, messages)
         return messages
+
+    def _tool_protocol_safe_history(self, *, limit: int) -> list[ChatMessage]:
+        """截取最近对话时保留 OpenAI tool_calls/tool 响应的配对关系。"""
+        history = self.state.messages
+        start = max(0, len(history) - limit)
+        while start > 0 and history[start].role == "tool":
+            start -= 1
+        return self._sanitize_tool_protocol(history[start:])
+
+    def _sanitize_tool_protocol(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """移除或降级孤立 tool 消息，避免发送给模型的上下文违反工具调用协议。"""
+        safe: list[ChatMessage] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            if message.role == "tool":
+                safe.append(self._tool_observation_as_assistant(message))
+                index += 1
+                continue
+            if message.role != "assistant" or not message.tool_calls:
+                safe.append(message)
+                index += 1
+                continue
+
+            tool_messages: list[ChatMessage] = []
+            next_index = index + 1
+            call_ids = {call.id for call in message.tool_calls}
+            while next_index < len(messages) and messages[next_index].role == "tool":
+                tool_message = messages[next_index]
+                if tool_message.tool_call_id in call_ids:
+                    tool_messages.append(tool_message)
+                else:
+                    safe.append(self._tool_observation_as_assistant(tool_message))
+                next_index += 1
+
+            answered_ids = {tool_message.tool_call_id for tool_message in tool_messages}
+            answered_calls = [call for call in message.tool_calls if call.id in answered_ids]
+            if answered_calls:
+                safe.append(
+                    ChatMessage(
+                        role="assistant",
+                        content=[TextPart(text=part.text, type=part.type) for part in message.content],
+                        tool_calls=answered_calls,
+                        metadata=dict(message.metadata),
+                        timestamp=message.timestamp,
+                    )
+                )
+                safe.extend(tool_messages)
+            elif message.text_content().strip():
+                safe.append(ChatMessage.text("assistant", message.text_content()))
+            index = next_index
+        return safe
+
+    @staticmethod
+    def _tool_observation_as_assistant(message: ChatMessage) -> ChatMessage:
+        """把无法配对的 tool 结果改写成普通助手观察，避免 provider 拒绝请求。"""
+        name = message.tool_name or message.tool_call_id or "unknown tool"
+        text = message.text_content() or "(empty tool result)"
+        return ChatMessage.text("assistant", f"Tool observation from {name}:\n{text}")
 
     def _policy_decision(self, call: ToolCall):
         """读取工具规格，并根据权限域和副作用计算安全策略。"""
