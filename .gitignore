@@ -1,8 +1,6 @@
 ﻿__pycache__/
 *.pyc
 .env
-.env_d/
-gptapikey/
 .codemuse/
 .private_notes/
 .venv/
