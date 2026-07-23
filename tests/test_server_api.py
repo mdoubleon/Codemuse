@@ -1,12 +1,14 @@
 """验证 server api 相关功能在对外行为上符合预期。"""
 from __future__ import annotations
 
+import http.client
 import json
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -114,6 +116,59 @@ class ServerApiTests(unittest.TestCase):
                 self.assertEqual(queued["session_id"], session_id)
                 handle = manager.get_session(session_id)
                 _wait_for_event(handle, "prompt_completed")
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_http_server_rejects_cross_origin_browser_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            manager = WebSessionManager(default_workspace=root)
+            server = CodeMuseServer(("127.0.0.1", 0), manager)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                request = urllib.request.Request(
+                    f"{base}/api/workspace",
+                    headers={"Origin": "https://malicious.example", "Sec-Fetch-Site": "cross-site"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request, timeout=3)
+
+                self.assertEqual(raised.exception.code, 403)
+                self.assertIsNone(raised.exception.headers.get("Access-Control-Allow-Origin"))
+                raised.exception.close()
+
+                same_origin = urllib.request.Request(f"{base}/api/health", headers={"Origin": base})
+                with urllib.request.urlopen(same_origin, timeout=3) as response:
+                    self.assertTrue(json.loads(response.read().decode("utf-8"))["ok"])
+                    self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
+                    self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_http_server_rejects_oversized_json_body(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            manager = WebSessionManager(default_workspace=root)
+            server = CodeMuseServer(("127.0.0.1", 0), manager)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+                try:
+                    connection.putrequest("POST", "/api/sessions")
+                    connection.putheader("Content-Length", str(1024 * 1024 + 1))
+                    connection.putheader("Content-Type", "application/json")
+                    connection.endheaders()
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 413)
+                finally:
+                    connection.close()
             finally:
                 server.shutdown()
                 server.server_close()

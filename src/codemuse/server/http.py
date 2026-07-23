@@ -30,6 +30,7 @@ _IGNORED_BROWSER_DIRS = {
 }
 _TEXT_PREVIEW_LIMIT = 256 * 1024
 _TREE_CHILD_LIMIT = 400
+_MAX_JSON_BODY_BYTES = 1024 * 1024
 
 _STATIC_ROUTES = {
     "/": "index.html",
@@ -54,6 +55,9 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         """处理 HTTP GET 请求，主要用于 health、session 列表和事件查询。"""
+        if not self._request_origin_allowed():
+            self._send_json({"error": "Cross-origin requests are not allowed."}, status=HTTPStatus.FORBIDDEN)
+            return
         parsed = urlparse(self.path)
         static_asset = _static_asset_name(parsed.path)
         if static_asset:
@@ -146,6 +150,9 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         """处理 HTTP POST 请求，把 prompt、approval、checkpoint 等操作路由到 SessionHandle。"""
+        if not self._request_origin_allowed():
+            self._send_json({"error": "Cross-origin requests are not allowed."}, status=HTTPStatus.FORBIDDEN)
+            return
         parts = _api_path_parts(urlparse(self.path).path)
         payload = self._read_json()
         if payload is None:
@@ -224,11 +231,12 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_OPTIONS(self) -> None:
-        """响应 CORS preflight 请求，便于未来 Web UI 调用。"""
+        """A same-origin UI does not need CORS; reject cross-origin preflight requests."""
+        if not self._request_origin_allowed():
+            self._send_json({"error": "Cross-origin requests are not allowed."}, status=HTTPStatus.FORBIDDEN)
+            return
         self.send_response(HTTPStatus.NO_CONTENT.value)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self._send_security_headers()
         self.end_headers()
 
     def log_message(self, format: str, *args: object) -> None:
@@ -237,10 +245,28 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
 
     def _read_json(self) -> dict | None:
         """读取 HTTP 请求体并解析成 JSON 对象。"""
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send_json({"error": "Invalid Content-Length."}, status=HTTPStatus.BAD_REQUEST)
+            return None
+        if length < 0:
+            self._send_json({"error": "Invalid Content-Length."}, status=HTTPStatus.BAD_REQUEST)
+            return None
+        if length > _MAX_JSON_BODY_BYTES:
+            self.close_connection = True
+            self._send_json(
+                {"error": f"JSON body exceeds {_MAX_JSON_BODY_BYTES} bytes."},
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+            return None
         if length <= 0:
             return {}
-        raw = self.rfile.read(length).decode("utf-8")
+        try:
+            raw = self.rfile.read(length).decode("utf-8")
+        except UnicodeDecodeError:
+            self._send_json({"error": "JSON body must be UTF-8."}, status=HTTPStatus.BAD_REQUEST)
+            return None
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
@@ -257,7 +283,7 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status.value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -275,9 +301,28 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def _request_origin_allowed(self) -> bool:
+        """Allow native clients and same-origin browsers, while blocking cross-site access."""
+        fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if fetch_site == "cross-site":
+            return False
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        parsed = urlparse(origin)
+        host = (self.headers.get("Host") or "").strip()
+        return parsed.scheme == "http" and bool(parsed.netloc) and parsed.netloc.casefold() == host.casefold()
+
+    def _send_security_headers(self) -> None:
+        """Apply browser protections shared by JSON and static responses."""
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
 
 
 def run_server(*, host: str, port: int, workspace: Path) -> None:
