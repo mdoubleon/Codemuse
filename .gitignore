@@ -1,6 +1,10 @@
 ﻿__pycache__/
 *.pyc
 .env
+.env_d
+.env_d/
+gptapikey
+gptapikey/
 .codemuse/
 .private_notes/
 .venv/
