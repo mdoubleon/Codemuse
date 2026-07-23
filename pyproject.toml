@@ -16,4 +16,4 @@ codemuse = "codemuse.cli.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"codemuse.web.static" = ["*.html", "*.js", "*.css", "assets/*.png"]
+"codemuse.web.static" = ["*.html", "*.js", "*.css", "assets/*.png", "assets/*.webp"]
