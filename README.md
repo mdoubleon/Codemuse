@@ -36,8 +36,8 @@ CodeMuse 是一个个人 Coding Agent 学习项目。
 
 CodeMuse 当前包含这些能力：
 
-- 本地浏览器工作台：对话、历史会话、运行详情、审批、记忆检索、模型配置。
-- CLI 和 Python SDK：支持单次任务、审批、checkpoint/rewind、doctor、benchmark、memory 等命令。
+- 本地浏览器工作台：对话、树形会话与上下文分支、运行详情、审批、记忆检索、模型配置。
+- CLI 和 Python SDK：支持单次任务、会话 fork、审批、checkpoint/rewind、doctor、benchmark、memory 等命令。
 - 工具系统：读取文件、写文件、搜索、替换、应用补丁、运行 shell、受控网页获取、仓库分析。
 - 安全机制：有副作用的工具默认进入审批，执行前生成影响预览，并自动创建检查点。
 - 记忆系统：项目长期记忆、仓库蓝图记忆、工作区索引和每轮自动召回。
@@ -143,6 +143,19 @@ src/codemuse/
 ```
 
 这里会保存会话、审批、记忆、检查点和 timeline。这个目录默认不会提交到仓库。
+
+## 树形会话
+
+每个新任务都是一棵会话树的根节点。工作台里的“创建分支”会复制当前会话已保存的消息快照，生成可独立继续对话的子节点；后续修改只影响各自分支。旧版 session JSON 没有树字段时会自动作为根节点加载，不需要迁移数据。
+
+HTTP API 保留原有扁平 `sessions` 字段，同时增加嵌套的 `session_tree`，因此旧客户端可以继续工作：
+
+```text
+GET  /api/sessions
+POST /api/sessions  {"parent_session_id": "<parent-id>"}
+```
+
+Python SDK 对应提供 `list_session_tree(workspace)` 和 `fork_session(workspace, parent_session_id)`。父会话正在运行或仍有排队任务时，Web fork 会返回 400，避免复制到不完整的中间状态。
 
 ## 建议阅读顺序
 

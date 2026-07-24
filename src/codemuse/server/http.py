@@ -121,7 +121,11 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(_latest_report_payload(self.server.manager.default_workspace))
                 return
             if parts == ["sessions"]:
-                self._send_json({"sessions": self.server.manager.list_sessions()})
+                sessions = self.server.manager.list_sessions()
+                self._send_json({
+                    "sessions": sessions,
+                    "session_tree": self.server.manager.list_session_tree(sessions),
+                })
                 return
             if len(parts) == 2 and parts[0] == "sessions":
                 handle = self.server.manager.get_session(parts[1])
@@ -168,8 +172,12 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
             if parts == ["sessions"]:
                 workspace_value = str(payload.get("workspace") or "").strip()
                 workspace = Path(workspace_value) if workspace_value else None
-                handle = self.server.manager.create_session(workspace=workspace)
-                self._send_json({"session_id": handle.session_id}, status=HTTPStatus.CREATED)
+                parent_session_id = str(payload.get("parent_session_id") or "").strip() or None
+                handle = self.server.manager.create_session(workspace=workspace, parent_session_id=parent_session_id)
+                self._send_json(
+                    {"session_id": handle.session_id, "parent_session_id": parent_session_id},
+                    status=HTTPStatus.CREATED,
+                )
                 return
             if parts == ["memory", "index"]:
                 max_files = int(payload.get("max_files") or 300)

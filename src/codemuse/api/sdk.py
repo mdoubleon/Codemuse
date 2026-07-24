@@ -16,7 +16,7 @@ from codemuse.runtime.events import AgentEvent
 from codemuse.runtime.runtime import AgentRuntime
 from codemuse.storage.approvals import PendingApprovalStore
 from codemuse.storage.checkpoints import CheckpointStore
-from codemuse.storage.sessions import SessionStore
+from codemuse.storage.sessions import SessionStore, build_session_tree
 from codemuse.storage.timeline import TimelineStore
 
 Subscriber = Callable[[AgentEvent], None]
@@ -125,6 +125,19 @@ def rewind(
 def list_sessions(workspace: Path) -> list[dict[str, Any]]:
     """列出 workspace 下保存的所有会话记录。"""
     return [record.to_dict() for record in _session_store(workspace.resolve()).list()]
+
+
+def list_session_tree(workspace: Path) -> list[dict[str, Any]]:
+    """把保存的会话列成嵌套的根节点和子节点。"""
+    return build_session_tree(list_sessions(workspace))
+
+
+def fork_session(workspace: Path, parent_session_id: str) -> dict[str, Any]:
+    """分支一个已保存会话，并返回独立持久化的子会话。"""
+    store = _session_store(workspace.resolve())
+    child = store.fork(parent_session_id)
+    store.save(child)
+    return child.to_dict()
 
 
 def list_approvals(workspace: Path, *, status: str | None = "pending") -> list[dict[str, Any]]:

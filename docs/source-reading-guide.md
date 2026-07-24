@@ -47,7 +47,7 @@ CLI / SDK / Web
 ## src/codemuse/api
 
 - `api/__init__.py`：导出 SDK 的公共函数，方便外部 import。
-- `api/sdk.py`：对外稳定 Python API。CLI、Web 和外部 Python 调用基本都通过这里进入 Runtime；包含 `run`、`approve`、`reject`、`rewind`、`list_sessions`、`search_memory` 等。
+- `api/sdk.py`：对外稳定 Python API。CLI、Web 和外部 Python 调用基本都通过这里进入 Runtime；包含 `run`、`approve`、`reject`、`rewind`、`list_sessions`、`list_session_tree`、`fork_session`、`search_memory` 等。
 
 阅读重点：这是“外部世界调用 CodeMuse”的边界。你现在打开的 `sdk.py` 可以当作源码阅读起点。
 
@@ -122,7 +122,7 @@ CLI / SDK / Web
 
 ## src/codemuse/storage
 
-- `storage/sessions.py`：把 session messages 和 system prompt 保存成 JSON。
+- `storage/sessions.py`：把 session messages、system prompt 和父子关系保存成 JSON；负责 fork 快照及树结构构建。
 - `storage/approvals.py`：保存 pending approval，支持 approve/reject/invalid/stale 状态。
 - `storage/checkpoints.py`：保存 checkpoint record，并按 checkpoint_id 加载。
 - `storage/timeline.py`：把 AgentEvent 追加到 JSONL，方便回看运行过程。

@@ -19,6 +19,19 @@ class SessionRecord:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     messages: list[ChatMessage] = field(default_factory=list)
+    parent_session_id: str | None = None
+    root_session_id: str | None = None
+    depth: int = 0
+    forked_at_message: int | None = None
+
+    def __post_init__(self) -> None:
+        """规范化树关系，让旧版记录自动成为根节点。"""
+        if not self.root_session_id:
+            self.root_session_id = self.session_id
+        if self.parent_session_id is None:
+            self.depth = 0
+        elif self.depth < 1:
+            self.depth = 1
 
     def to_dict(self) -> dict[str, Any]:
         """把 SessionRecord 转成可写入文件或 API 响应的字典。"""
@@ -28,6 +41,10 @@ class SessionRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "messages": [message.to_dict() for message in self.messages],
+            "parent_session_id": self.parent_session_id,
+            "root_session_id": self.root_session_id,
+            "depth": self.depth,
+            "forked_at_message": self.forked_at_message,
         }
 
     @classmethod
@@ -39,6 +56,10 @@ class SessionRecord:
             created_at=float(payload.get("created_at") or time.time()),
             updated_at=float(payload.get("updated_at") or time.time()),
             messages=[ChatMessage.from_dict(item) for item in payload.get("messages", [])],
+            parent_session_id=str(payload["parent_session_id"]) if payload.get("parent_session_id") else None,
+            root_session_id=str(payload["root_session_id"]) if payload.get("root_session_id") else None,
+            depth=max(0, int(payload.get("depth") or 0)),
+            forked_at_message=int(payload["forked_at_message"]) if payload.get("forked_at_message") is not None else None,
         )
 
 
@@ -52,6 +73,21 @@ class SessionStore:
     def create(self, system_prompt: str) -> SessionRecord:
         """创建一条新的领域记录或运行结果。"""
         return SessionRecord(session_id=str(uuid.uuid4()), system_prompt=system_prompt)
+
+    def fork(self, parent_session_id: str) -> SessionRecord:
+        """从父会话当前的消息快照创建可独立演进的子会话。"""
+        parent = self.load(parent_session_id)
+        child_id = str(uuid.uuid4())
+        messages = [ChatMessage.from_dict(message.to_dict()) for message in parent.messages]
+        return SessionRecord(
+            session_id=child_id,
+            system_prompt=parent.system_prompt,
+            messages=messages,
+            parent_session_id=parent.session_id,
+            root_session_id=parent.root_session_id or parent.session_id,
+            depth=parent.depth + 1,
+            forked_at_message=len(messages),
+        )
 
     def save(self, record: SessionRecord) -> None:
         """将对象写入本地存储。"""
@@ -76,3 +112,31 @@ class SessionStore:
                 # 会话列表是给 CLI/SDK 展示用；坏文件跳过，避免一个损坏记录拖垮整个入口。
                 continue
         return sorted(records, key=lambda item: item.updated_at, reverse=True)
+
+    def list_tree(self) -> list[dict[str, Any]]:
+        """把持久化会话列成经过校验的嵌套森林。"""
+        return build_session_tree([record.to_dict() for record in self.list()])
+
+
+def build_session_tree(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """构建会话森林，孤儿节点或损坏的树关系仍作为根节点保留。"""
+    nodes = {str(item["session_id"]): {**item, "children": []} for item in sessions}
+    roots: list[dict[str, Any]] = []
+    for item in sessions:
+        node = nodes[str(item["session_id"])]
+        parent_id = str(item.get("parent_session_id") or "")
+        parent = nodes.get(parent_id)
+        same_tree = parent and parent.get("root_session_id") == item.get("root_session_id")
+        descends = parent and int(parent.get("depth") or 0) < int(item.get("depth") or 0)
+        if parent and parent_id != item["session_id"] and same_tree and descends:
+            parent["children"].append(node)
+        else:
+            roots.append(node)
+    _sort_tree(roots)
+    return roots
+
+
+def _sort_tree(nodes: list[dict[str, Any]]) -> None:
+    nodes.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+    for node in nodes:
+        _sort_tree(node["children"])

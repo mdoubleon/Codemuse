@@ -54,6 +54,7 @@ class AgentRuntime:
         self.timeline_store = timeline_store
         self.policy_evaluator = policy_evaluator or ToolPolicyEvaluator()
         self.max_turns = max_turns
+        self.session = session
         self.state = AgentState(session_id=session.session_id, system_prompt=session.system_prompt, messages=session.messages)
         self._subscribers: list[Subscriber] = []
         self._cancel_event = threading.Event()
@@ -520,12 +521,9 @@ class AgentRuntime:
 
     def _persist(self) -> None:
         """把当前会话的系统提示和消息历史写入 SessionStore。"""
-        record = SessionRecord(
-            session_id=self.state.session_id,
-            system_prompt=self.state.system_prompt,
-            messages=self.state.messages,
-        )
-        self.session_store.save(record)
+        self.session.system_prompt = self.state.system_prompt
+        self.session.messages = self.state.messages
+        self.session_store.save(self.session)
 
     def _emit(
         self,

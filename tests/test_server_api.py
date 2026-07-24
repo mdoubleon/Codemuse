@@ -96,6 +96,49 @@ class ServerApiTests(unittest.TestCase):
             self.assertTrue(any(event["type"] == "local_user_prompt" and event["message"] == "list files" for event in restored_events))
             self.assertTrue(any(event["type"] == "message" for event in restored_events))
 
+    def test_session_manager_forks_context_and_returns_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            manager = WebSessionManager(default_workspace=root)
+            parent = manager.create_session()
+            parent.prompt("list files")
+            _wait_for_event(parent, "prompt_completed")
+
+            child = manager.create_session(parent_session_id=parent.session_id)
+            child_events = child.events_after(0)["events"]
+            tree = manager.list_session_tree()
+
+            self.assertEqual(child.snapshot()["parent_session_id"], parent.session_id)
+            self.assertTrue(any(event["type"] == "local_user_prompt" for event in child_events))
+            root_node = next(item for item in tree if item["session_id"] == parent.session_id)
+            self.assertEqual(root_node["children"][0]["session_id"], child.session_id)
+
+    def test_session_manager_rejects_fork_with_queued_parent_job(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            manager = WebSessionManager(default_workspace=root)
+            parent = manager.create_session()
+            started = threading.Event()
+            release = threading.Event()
+            original_complete = parent.runtime.llm.complete
+
+            def blocking_complete(*args, **kwargs):
+                started.set()
+                release.wait(timeout=3)
+                return original_complete(*args, **kwargs)
+
+            parent.runtime.llm.complete = blocking_complete  # type: ignore[method-assign]
+            parent.prompt("list files")
+            self.assertTrue(started.wait(timeout=1))
+            try:
+                with self.assertRaisesRegex(ValueError, "Cannot fork"):
+                    manager.create_session(parent_session_id=parent.session_id)
+            finally:
+                release.set()
+            _wait_for_event(parent, "prompt_completed")
+
     def test_http_server_exposes_session_prompt_api(self) -> None:
         """验证该场景下的输入、状态变化和输出是否符合预期。"""
         with tempfile.TemporaryDirectory() as raw:
@@ -116,6 +159,31 @@ class ServerApiTests(unittest.TestCase):
                 self.assertEqual(queued["session_id"], session_id)
                 handle = manager.get_session(session_id)
                 _wait_for_event(handle, "prompt_completed")
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_http_server_creates_session_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            manager = WebSessionManager(default_workspace=root)
+            server = CodeMuseServer(("127.0.0.1", 0), manager)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                parent = _json_request(f"{base}/api/sessions", method="POST", payload={})
+                child = _json_request(
+                    f"{base}/api/sessions",
+                    method="POST",
+                    payload={"parent_session_id": parent["session_id"]},
+                )
+                sessions = _json_request(f"{base}/api/sessions")
+
+                self.assertEqual(child["parent_session_id"], parent["session_id"])
+                root_node = next(item for item in sessions["session_tree"] if item["session_id"] == parent["session_id"])
+                self.assertEqual(root_node["children"][0]["session_id"], child["session_id"])
             finally:
                 server.shutdown()
                 server.server_close()

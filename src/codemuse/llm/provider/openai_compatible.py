@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -15,6 +16,7 @@ from codemuse.llm.models import LLMResponse
 from codemuse.llm.provider.base import LLMProviderInfo
 
 DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://api.openai.com/v1"
+_RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 
 
 @dataclass(frozen=True)
@@ -54,12 +56,14 @@ class OpenAICompatibleProvider:
         base_url: str = "",
         api_key_env: str = "OPENAI_API_KEY",
         timeout_seconds: int = 60,
+        max_retries: int = 2,
     ) -> None:
         """初始化 OpenAICompatibleProvider 并保存运行依赖。"""
         self.model = model
         self.base_url = _normalize_base_url(base_url or DEFAULT_OPENAI_COMPATIBLE_BASE_URL)
         self.api_key_env = api_key_env or "OPENAI_API_KEY"
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max(0, max_retries)
         self._info = LLMProviderInfo(provider="openai_compatible", model=model, supports_tools=True, is_stub=False)
 
     @property
@@ -101,24 +105,34 @@ class OpenAICompatibleProvider:
         """处理 postchatcompletions。"""
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         url = f"{self.base_url}/chat/completions"
-        request = urllib.request.Request(
-            url,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Provider HTTP {exc.code}: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Provider request failed: {exc.reason}") from exc
+        attempts = self.max_retries + 1
+        for attempt in range(1, attempts + 1):
+            request = urllib.request.Request(
+                url,
+                data=body,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    raw = response.read().decode("utf-8", errors="replace")
+                break
+            except urllib.error.HTTPError as exc:
+                try:
+                    detail = exc.read().decode("utf-8", errors="replace")
+                finally:
+                    exc.close()
+                if exc.code in _RETRYABLE_HTTP_STATUS and attempt < attempts:
+                    time.sleep(_retry_delay(exc, attempt))
+                    continue
+                suffix = f" after {attempt} attempts" if attempt > 1 else ""
+                raise RuntimeError(f"Provider HTTP {exc.code}{suffix}: {detail}") from exc
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"Provider request failed: {exc.reason}") from exc
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -132,6 +146,17 @@ class OpenAICompatibleProvider:
 def _normalize_base_url(value: str) -> str:
     """处理 normalize基础URL。"""
     return value.rstrip("/")
+
+
+def _retry_delay(error: urllib.error.HTTPError, attempt: int) -> float:
+    """优先使用 Retry-After，否则采用有上限的指数退避。"""
+    retry_after = error.headers.get("Retry-After") if error.headers else None
+    if retry_after:
+        try:
+            return min(10.0, max(0.0, float(retry_after)))
+        except ValueError:
+            pass
+    return min(4.0, 0.5 * (2 ** (attempt - 1)))
 
 
 def _message_to_payload(message: ChatMessage) -> dict[str, Any]:

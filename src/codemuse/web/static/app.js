@@ -4,6 +4,7 @@ const state = {
   events: [],
   localEvents: [],
   sessions: [],
+  sessionTree: [],
   snapshot: null,
   approvals: [],
   checkpoints: [],
@@ -86,7 +87,7 @@ function cacheNodes() {
     "repo-refresh", "repo-status", "repo-cache", "report-refresh", "report-summary",
     "api-form", "api-refresh", "api-status", "api-provider", "api-model",
     "api-base-url", "api-key-env", "provider-list", "capabilities",
-    "sessions-panel", "sessions", "new-session", "refresh", "status-dot",
+    "sessions-panel", "sessions", "new-session", "fork-session", "refresh", "status-dot",
     "command-input", "toast",
     "nav-approval-hint", "nav-approval-badge", "nav-sessions-hint"
   ];
@@ -105,6 +106,7 @@ function preloadMascots() {
 
 function bindEvents() {
   nodes.newSession.addEventListener("click", e => withButton(e.currentTarget, createSession()));
+  nodes.forkSession.addEventListener("click", e => withButton(e.currentTarget, forkCurrentSession()));
   nodes.refresh.addEventListener("click", e => withButton(e.currentTarget, refreshWorkspace().then(() => showToast("已刷新工作台", "success"))));
   nodes.checkpoint.addEventListener("click", e => withButton(e.currentTarget, createCheckpoint()));
   nodes.stopButton.addEventListener("click", e => withButton(e.currentTarget, cancelRun()));
@@ -301,6 +303,7 @@ async function refreshWorkspace() {
   setInputValue(nodes.workspacePath, state.workspacePath);
   state.capabilities = capabilities.capabilities || [];
   state.sessions = sessions.sessions || [];
+  state.sessionTree = sessions.session_tree || [];
   if (!state.sessionId && state.sessions.length > 0) {
     state.sessionId = state.sessions[0].session_id;
   }
@@ -377,6 +380,22 @@ async function createSession() {
   state.renderCache = {};
   await refreshWorkspace();
   showToast(`已创建新任务 ${shortId(state.sessionId)}`, "success");
+}
+
+async function forkCurrentSession() {
+  if (!state.sessionId) return;
+  const parentSessionId = state.sessionId;
+  const created = await request("/api/sessions", {
+    method: "POST",
+    body: { parent_session_id: parentSessionId }
+  });
+  state.sessionId = created.session_id;
+  state.cursor = 0;
+  state.events = [];
+  state.localEvents = [];
+  state.renderCache = {};
+  await refreshWorkspace();
+  showToast(`已从 ${shortId(parentSessionId)} 创建分支`, "success");
 }
 
 async function selectSession(sessionId) {
@@ -680,6 +699,7 @@ function renderShell() {
 
   setDisabled(nodes.send, !nodes.prompt.value.trim() || running);
   setDisabled(nodes.stopButton, !running);
+  setDisabled(nodes.forkSession, !state.sessionId || running);
 }
 
 function fingerprint(obj) {
@@ -693,7 +713,7 @@ function shouldSkip(key, fp) {
 
 function renderSessions() {
   const fp = fingerprint({
-    s: state.sessions.map(s => [s.session_id, s.state?.phase, s.updated_at, s.created_at]),
+    s: state.sessions.map(s => [s.session_id, s.parent_session_id, s.depth, s.state?.phase, s.updated_at]),
     active: state.sessionId
   });
   if (shouldSkip("sessions", fp)) return;
@@ -702,15 +722,26 @@ function renderSessions() {
     nodes.sessions.innerHTML = emptyHtml("暂无历史会话");
     return;
   }
-  nodes.sessions.innerHTML = state.sessions.slice(0, 40).map(session => {
-    const id = session.session_id || "";
-    const active = id === state.sessionId ? " active" : "";
-    const phase = phaseLabel(session.state?.phase || "idle");
-    return `<button class="session-row${active}" data-session-id="${escapeHtml(id)}" type="button">
-      <span><strong>${escapeHtml(shortId(id))}</strong><small>${escapeHtml(phase)}</small></span>
+  const roots = state.sessionTree.length ? state.sessionTree : state.sessions;
+  nodes.sessions.innerHTML = roots.map(renderSessionNode).join("");
+}
+
+function renderSessionNode(session) {
+  const id = session.session_id || "";
+  const children = Array.isArray(session.children) ? session.children : [];
+  const active = id === state.sessionId ? " active" : "";
+  const phase = phaseLabel(session.state?.phase || "idle");
+  const branch = session.parent_session_id ? `<span class="branch-mark" aria-hidden="true">↳</span>` : "";
+  const childHtml = children.length
+    ? `<div class="session-children">${children.map(renderSessionNode).join("")}</div>`
+    : "";
+  return `<div class="session-node">
+    <button class="session-row${active}" data-session-id="${escapeHtml(id)}" type="button">
+      <span class="session-name">${branch}<span><strong>${escapeHtml(shortId(id))}</strong><small>${escapeHtml(phase)}</small></span></span>
       <em>${escapeHtml(formatTime(session.updated_at || session.created_at))}</em>
-    </button>`;
-  }).join("");
+    </button>
+    ${childHtml}
+  </div>`;
 }
 
 function renderEvents() {

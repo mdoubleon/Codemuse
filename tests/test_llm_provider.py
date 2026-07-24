@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -120,6 +121,59 @@ class LLMProviderTests(unittest.TestCase):
         self.assertEqual(response.usage["total_tokens"], 15)
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "https://example.test/v1/chat/completions")
+
+    def test_openai_compatible_provider_retries_transient_http_errors(self) -> None:
+        provider = OpenAICompatibleProvider(
+            model="test-model",
+            base_url="https://example.test/v1",
+            api_key_env="TEST_API_KEY",
+            max_retries=2,
+        )
+        transient = urllib.error.HTTPError(
+            "https://example.test/v1/chat/completions",
+            502,
+            "Bad Gateway",
+            {},
+            io.BytesIO(b'{"error":{"message":"upstream unavailable"}}'),
+        )
+        success = _FakeHTTPResponse({
+            "choices": [{"message": {"role": "assistant", "content": "recovered"}, "finish_reason": "stop"}],
+        })
+
+        with patch.dict("os.environ", {"TEST_API_KEY": "secret"}), patch(
+            "urllib.request.urlopen",
+            side_effect=[transient, success],
+        ) as urlopen, patch("time.sleep") as sleep:
+            response = provider.complete([ChatMessage.text("user", "hello")], [])
+
+        self.assertEqual(response.text, "recovered")
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
+    def test_openai_compatible_provider_does_not_retry_client_errors(self) -> None:
+        provider = OpenAICompatibleProvider(
+            model="test-model",
+            base_url="https://example.test/v1",
+            api_key_env="TEST_API_KEY",
+            max_retries=2,
+        )
+        forbidden = urllib.error.HTTPError(
+            "https://example.test/v1/chat/completions",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b'{"error":{"message":"forbidden"}}'),
+        )
+
+        with patch.dict("os.environ", {"TEST_API_KEY": "secret"}), patch(
+            "urllib.request.urlopen",
+            side_effect=forbidden,
+        ) as urlopen, patch("time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "Provider HTTP 403"):
+                provider.complete([ChatMessage.text("user", "hello")], [])
+
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
 
     def test_unknown_provider_is_rejected_by_config_schema(self) -> None:
         """验证该场景下的输入、状态变化和输出是否符合预期。"""

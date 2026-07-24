@@ -11,7 +11,7 @@ from typing import Any
 from codemuse.app.bootstrap import build_agent
 from codemuse.runtime.events import AgentEvent
 from codemuse.runtime.runtime import AgentRuntime
-from codemuse.storage.sessions import SessionStore
+from codemuse.storage.sessions import SessionRecord, SessionStore, build_session_tree
 
 
 @dataclass(frozen=True)
@@ -119,6 +119,10 @@ class SessionHandle:
             pending_jobs = self._jobs.qsize()
         return {
             "session_id": self.session_id,
+            "parent_session_id": self.runtime.session.parent_session_id,
+            "root_session_id": self.runtime.session.root_session_id,
+            "depth": self.runtime.session.depth,
+            "forked_at_message": self.runtime.session.forked_at_message,
             "pending_jobs": pending_jobs,
             "state": self.runtime.state.to_dict(),
         }
@@ -279,9 +283,22 @@ class WebSessionManager:
             handle.close()
         return resolved
 
-    def create_session(self, *, workspace: Path | None = None) -> SessionHandle:
+    def create_session(self, *, workspace: Path | None = None, parent_session_id: str | None = None) -> SessionHandle:
         """为指定 workspace 构建 AgentRuntime，并用 SessionHandle 管理它。"""
-        runtime = build_agent((workspace or self.default_workspace).resolve())
+        resolved_workspace = (workspace or self.default_workspace).resolve()
+        if parent_session_id:
+            with self._lock:
+                parent_handle = self._handles.get(parent_session_id)
+            if parent_handle is not None:
+                parent_snapshot = parent_handle.snapshot()
+                if parent_snapshot["pending_jobs"] or parent_snapshot["state"]["is_running"]:
+                    raise ValueError("Cannot fork a session while it is running or has queued jobs.")
+            store = SessionStore(resolved_workspace / ".data" / "codemuse" / "sessions")
+            child = store.fork(parent_session_id)
+            store.save(child)
+            runtime = build_agent(resolved_workspace, session_id=child.session_id)
+        else:
+            runtime = build_agent(resolved_workspace)
         handle = SessionHandle(runtime)
         with self._lock:
             self._handles[handle.session_id] = handle
@@ -310,6 +327,7 @@ class WebSessionManager:
                 snapshots[record.session_id]["created_at"] = record.created_at
                 snapshots[record.session_id]["updated_at"] = record.updated_at
                 snapshots[record.session_id]["message_count"] = len(record.messages)
+                snapshots[record.session_id].update(_lineage_payload(record))
                 continue
             snapshots[record.session_id] = {
                 "session_id": record.session_id,
@@ -327,5 +345,19 @@ class WebSessionManager:
                 "created_at": record.created_at,
                 "updated_at": record.updated_at,
                 "message_count": len(record.messages),
+                **_lineage_payload(record),
             }
         return sorted(snapshots.values(), key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+
+    def list_session_tree(self, sessions: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        """把会话列表嵌套成树，同时保留损坏关系或孤儿节点。"""
+        return build_session_tree(sessions if sessions is not None else self.list_sessions())
+
+
+def _lineage_payload(record: SessionRecord) -> dict[str, Any]:
+    return {
+        "parent_session_id": record.parent_session_id,
+        "root_session_id": record.root_session_id,
+        "depth": record.depth,
+        "forked_at_message": record.forked_at_message,
+    }
