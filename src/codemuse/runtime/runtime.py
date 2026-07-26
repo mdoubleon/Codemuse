@@ -61,6 +61,7 @@ class AgentRuntime:
         self.state = AgentState(session_id=session.session_id, system_prompt=session.system_prompt, messages=session.messages)
         self._subscribers: list[Subscriber] = []
         self._cancel_event = threading.Event()
+        self._restore_pending_tool_calls()
 
     @property
     def session_id(self) -> str:
@@ -81,6 +82,8 @@ class AgentRuntime:
 
     def prompt(self, text: str) -> list[AgentEvent]:
         """接收用户输入并驱动 Agent 执行一轮任务。"""
+        if self._restore_pending_tool_calls():
+            raise RuntimeError("Cannot start a new prompt while this session has pending tool approvals.")
         self.state.messages.append(ChatMessage.text("user", text))
         return self._run_loop()
 
@@ -142,8 +145,7 @@ class AgentRuntime:
         digest_validation = validate_effect_digest(approval.tool_name, approval.arguments, approval.details)
         if not digest_validation["ok"]:
             self._mark_invalid_approval(approval_id, call, digest_validation, captured)
-            captured.extend(self._run_loop())
-            return captured
+            return self._continue_after_approval_resolution(captured)
 
         validation = validate_tool_effect_preview(
             self.workspace,
@@ -153,8 +155,7 @@ class AgentRuntime:
         )
         if not validation["ok"]:
             self._mark_stale_approval(approval_id, call, validation, captured)
-            captured.extend(self._run_loop())
-            return captured
+            return self._continue_after_approval_resolution(captured)
 
         self._emit("approval_approved", captured, tool_name=approval.tool_name, message=f"Approved: {approval_id}")
         # 用户批准后，直接执行原始工具调用；这里不再重复进入审批门。
@@ -166,8 +167,7 @@ class AgentRuntime:
         self.approval_store.mark(approval_id, "approved")
         self._persist()
         self._emit("tool_result", captured, tool_name=approval.tool_name, message=result.content[:500], details=result.details)
-        captured.extend(self._run_loop())
-        return captured
+        return self._continue_after_approval_resolution(captured)
 
     def reject(self, approval_id: str) -> list[AgentEvent]:
         """拒绝一个等待中的工具调用，并写回会话。"""
@@ -194,8 +194,7 @@ class AgentRuntime:
         self.state.pending_tool_calls = [call for call in self.state.pending_tool_calls if call.id != approval.tool_call_id]
         self._persist()
         self._emit("approval_rejected", captured, tool_name=approval.tool_name, message=f"Rejected: {approval_id}", is_error=True)
-        captured.extend(self._run_loop())
-        return captured
+        return self._continue_after_approval_resolution(captured)
 
     def _run_loop(self) -> list[AgentEvent]:
         """执行 ReAct 主循环：调用模型、处理工具调用、审批暂停和最终收尾。"""
@@ -252,7 +251,7 @@ class AgentRuntime:
                                 message=f"Approval required for {call.name}. approval_id={approval.approval_id}",
                                 details=approval_details,
                             )
-                            break
+                            continue
                         try:
                             self._checkpoint_before_tool(call, captured)
                             result = self.tool_registry.execute(call.name, call.arguments)
@@ -282,6 +281,8 @@ class AgentRuntime:
                     message="Agent cancelled by user request.",
                     details={"turn_id": self.state.turn_id},
                 )
+            elif self._restore_pending_tool_calls():
+                self.state.phase = "awaiting_approval"
             else:
                 self.state.phase = "idle"
             self.state.is_running = False
@@ -465,6 +466,36 @@ class AgentRuntime:
             details["effect_preview"] = effect_preview
         details["effect_digest"] = build_effect_digest(call.name, call.arguments, details.get("effect_preview"))
         return self.approval_store.create(session_id=self.session_id, call=call, reason=reason, details=details)
+
+    def _restore_pending_tool_calls(self) -> bool:
+        """从持久化审批恢复当前会话的未决调用，支持进程重启后继续同一工具批次。"""
+        if self.approval_store is None:
+            return bool(self.state.pending_tool_calls)
+        pending = [
+            approval
+            for approval in self.approval_store.list(status="pending")
+            if approval.session_id == self.session_id
+        ]
+        self.state.pending_tool_calls = [
+            ToolCall(
+                id=approval.tool_call_id,
+                name=approval.tool_name,
+                arguments=dict(approval.arguments),
+            )
+            for approval in reversed(pending)
+        ]
+        if pending:
+            self.state.phase = "awaiting_approval"
+        return bool(pending)
+
+    def _continue_after_approval_resolution(self, captured: list[AgentEvent]) -> list[AgentEvent]:
+        """等待同批其他审批完成；最后一个审批解决后才重新调用模型。"""
+        if self._restore_pending_tool_calls():
+            self.state.phase = "awaiting_approval"
+            self._persist()
+            return captured
+        captured.extend(self._run_loop())
+        return captured
 
     def _mark_invalid_approval(
         self,

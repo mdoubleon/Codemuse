@@ -9,6 +9,7 @@ workspace path containment      文件工具限制在 workspace 内
 approval-required writes        write_file / replace_text / apply_patch 需要审批
 effect preview                  写入前生成 diff / effect preview
 stale guard                     审批前后摘要不一致时阻止落盘
+tool batch integrity            同批工具全部批准或拒绝后才继续请求模型
 checkpoint before writes        高风险写入前创建 checkpoint
 workspace safe rewind           checkpoint 可恢复 workspace 文件
 shell safety policy             高风险 shell 命令会被 block/stale
@@ -41,4 +42,3 @@ doctor strict gate              发布前可运行 compile/test/web/eval gate
 有 unit 或 baseline case
 有 doctor/readiness 检查
 ```
-

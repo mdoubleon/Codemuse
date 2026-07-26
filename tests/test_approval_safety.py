@@ -12,7 +12,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from codemuse.app.bootstrap import build_agent
-from codemuse.domain.tools import ToolSpec
+from codemuse.domain.messages import ChatMessage
+from codemuse.domain.tools import ToolCall, ToolSpec
+from codemuse.llm.models import LLMResponse
+from codemuse.llm.provider.base import LLMProviderInfo
 from codemuse.storage.approvals import PendingApprovalStore
 from codemuse.tools.policy import ALLOW, ASK, ToolPolicyEvaluator
 
@@ -55,6 +58,69 @@ class ApprovalSafetyTests(unittest.TestCase):
             self.assertEqual(approved.status, "approved")
             self.assertTrue(any(event.type == "approval_approved" for event in approved_events))
             self.assertTrue(any(event.type == "tool_result" and event.tool_name == "save_blueprint_memory" for event in approved_events))
+
+    def test_multi_tool_batch_waits_for_all_approvals_and_survives_restart(self) -> None:
+        """整批 tool calls 必须全部产生结果后才能继续调用模型。"""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            write_first = ToolCall(
+                id="call_write_first",
+                name="write_file",
+                arguments={"path": "notes/first.txt", "content": "first", "create_dirs": True, "overwrite": True},
+            )
+            list_files = ToolCall(id="call_list", name="list_files", arguments={"path": ".", "max_depth": 1})
+            write_second = ToolCall(
+                id="call_write_second",
+                name="write_file",
+                arguments={"path": "notes/second.txt", "content": "second", "create_dirs": True, "overwrite": True},
+            )
+            llm = _SequencedLLM(
+                [
+                    LLMResponse(tool_calls=[write_first, list_files, write_second]),
+                    LLMResponse(text="all tool calls resolved"),
+                ]
+            )
+            agent = build_agent(root)
+            agent.memory_provider = None
+            agent.llm = llm
+
+            events = agent.prompt("run a mixed tool batch")
+
+            approvals = PendingApprovalStore(root / ".data" / "codemuse" / "approvals").list(status="pending")
+            self.assertEqual(len(approvals), 2)
+            self.assertEqual(len(llm.calls), 1)
+            self.assertEqual(agent.state.phase, "awaiting_approval")
+            self.assertTrue(any(event.type == "tool_result" and event.tool_name == "list_files" for event in events))
+            with self.assertRaisesRegex(RuntimeError, "pending tool approvals"):
+                agent.prompt("do not interrupt the pending batch")
+
+            approvals_by_path = {str(item.arguments["path"]): item for item in approvals}
+            first_events = agent.approve(approvals_by_path["notes/first.txt"].approval_id)
+
+            self.assertEqual(len(llm.calls), 1)
+            self.assertEqual(agent.state.phase, "awaiting_approval")
+            self.assertTrue((root / "notes" / "first.txt").exists())
+            self.assertFalse((root / "notes" / "second.txt").exists())
+            self.assertFalse(any(event.type == "agent_start" for event in first_events))
+
+            restored = build_agent(root, session_id=agent.session_id)
+            restored.memory_provider = None
+            restored.llm = llm
+            self.assertEqual(restored.state.phase, "awaiting_approval")
+            self.assertEqual([call.id for call in restored.state.pending_tool_calls], ["call_write_second"])
+
+            restored.approve(approvals_by_path["notes/second.txt"].approval_id)
+
+            self.assertEqual(len(llm.calls), 2)
+            self.assertEqual(restored.state.phase, "idle")
+            self.assertEqual(restored.state.pending_tool_calls, [])
+            self.assertTrue((root / "notes" / "second.txt").exists())
+            final_context = llm.calls[-1]
+            assistant_calls = next(message.tool_calls for message in final_context if message.role == "assistant" and message.tool_calls)
+            tool_result_ids = {message.tool_call_id for message in final_context if message.role == "tool"}
+            self.assertEqual({call.id for call in assistant_calls}, {"call_write_first", "call_list", "call_write_second"})
+            self.assertEqual(tool_result_ids, {"call_write_first", "call_list", "call_write_second"})
 
     def test_write_file_requires_approval_before_disk_change(self) -> None:
         """验证 write_file 先进入审批，批准后才真正写入 workspace。"""
@@ -333,6 +399,25 @@ def _write_sample_repo(root: Path) -> None:
     (root / "src/sample/runtime/runtime.py").write_text("class AgentRuntime:\n    pass\n", encoding="utf-8")
     (root / "src/sample/tools/registry.py").write_text("class ToolRegistry:\n    pass\n", encoding="utf-8")
     (root / "src/sample/storage/sessions.py").write_text("class SessionStore:\n    pass\n", encoding="utf-8")
+
+
+class _SequencedLLM:
+    """按顺序返回预设响应，并保存每次收到的上下文。"""
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[ChatMessage]] = []
+        self._info = LLMProviderInfo(provider="test", model="sequenced")
+
+    @property
+    def info(self) -> LLMProviderInfo:
+        return self._info
+
+    def complete(self, messages: list[ChatMessage], tools: list[ToolSpec]) -> LLMResponse:
+        self.calls.append(messages)
+        if not self._responses:
+            raise AssertionError("Unexpected extra model call.")
+        return self._responses.pop(0)
 
 
 if __name__ == "__main__":
