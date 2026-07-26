@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from codemuse.domain.messages import ChatMessage
+from codemuse.runtime.state import QueuedMessage
 
 
 @dataclass
@@ -23,6 +24,7 @@ class SessionRecord:
     root_session_id: str | None = None
     depth: int = 0
     forked_at_message: int | None = None
+    queued_messages: list[QueuedMessage] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """规范化树关系，让旧版记录自动成为根节点。"""
@@ -45,6 +47,7 @@ class SessionRecord:
             "root_session_id": self.root_session_id,
             "depth": self.depth,
             "forked_at_message": self.forked_at_message,
+            "queued_messages": [message.__dict__ for message in self.queued_messages],
         }
 
     @classmethod
@@ -60,6 +63,7 @@ class SessionRecord:
             root_session_id=str(payload["root_session_id"]) if payload.get("root_session_id") else None,
             depth=max(0, int(payload.get("depth") or 0)),
             forked_at_message=int(payload["forked_at_message"]) if payload.get("forked_at_message") is not None else None,
+            queued_messages=[QueuedMessage(text=str(item.get("text") or ""), delivery=str(item.get("delivery") or "follow_up")) for item in (payload.get("queued_messages") if isinstance(payload.get("queued_messages"), list) else []) if isinstance(item, dict) and str(item.get("text") or "").strip()],
         )
 
 
@@ -87,6 +91,7 @@ class SessionStore:
             root_session_id=parent.root_session_id or parent.session_id,
             depth=parent.depth + 1,
             forked_at_message=len(messages),
+            queued_messages=[QueuedMessage(item.text, item.delivery) for item in parent.queued_messages],
         )
 
     def save(self, record: SessionRecord) -> None:

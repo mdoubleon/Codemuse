@@ -188,7 +188,7 @@ Python SDK 对应提供 `list_session_tree(workspace)` 和 `fork_session(workspa
 7. `src/codemuse/web/static/`  
    看一个轻量 Agent Web UI 如何展示会话、审批、运行事件和记忆。
 
-更完整的代码路径可以看 [docs/source-map.md](docs/source-map.md)。
+更完整的代码路径可以看 [docs/code-flowline.md](docs/code-flowline.md)。
 
 ## 安全设计
 
@@ -225,11 +225,10 @@ external   调用外部能力
 
 ## 文档
 
-- [docs/source-map.md](docs/source-map.md)：主要代码路径和调用链。
+- [docs/code-flowline.md](docs/code-flowline.md)：主要代码路径和调用链。
 - [docs/demo.md](docs/demo.md)：五分钟演示脚本。
 - [docs/safety.md](docs/safety.md)：安全边界和审批机制。
 - [docs/known-limitations.md](docs/known-limitations.md)：当前限制。
-- [docs/interview-narrative.md](docs/interview-narrative.md)：项目讲解稿。
 
 ## 状态说明
 

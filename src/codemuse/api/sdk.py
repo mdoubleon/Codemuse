@@ -90,6 +90,26 @@ def reject(
     return _result_payload(runtime, events, collect_events=collect_events)
 
 
+def enqueue_message(
+    workspace: Path,
+    text: str,
+    *,
+    session_id: str | None = None,
+    delivery: str = "follow_up",
+) -> dict[str, Any]:
+    """Queue steering/follow-up input without mutating the active turn directly."""
+    runtime = create_runtime(workspace, session_id=session_id)
+    runtime.enqueue_message(text, delivery=delivery)
+    return _result_payload(runtime, [], collect_events=False)
+
+
+def compact_session(workspace: Path, *, session_id: str | None = None) -> dict[str, Any]:
+    """Compact persisted conversation history and return its operation report."""
+    runtime = create_runtime(workspace, session_id=session_id)
+    result = runtime.compact()
+    return {"session_id": runtime.session_id, **result, "state": runtime.state.to_dict()}
+
+
 def create_checkpoint(
     workspace: Path,
     *,

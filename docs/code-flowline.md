@@ -118,8 +118,8 @@ Runtime 只负责调度，不负责具体工具怎么干，也不负责具体模
 
 ```text
 fake                已实现，用于本地学习和测试
-openai_compatible   预留 stub
-bailian             预留 stub
+openai_compatible   已实现，缺少 API key 时仅报告 readiness
+bailian             已实现，缺少 API key 时仅报告 readiness
 ```
 
 `FakeLLM` 会根据用户输入用规则模拟模型行为，例如看到 `list files` 就生成 `ToolCall(name="list_files")`。
@@ -208,7 +208,7 @@ ToolCall(write_file / apply_patch / replace_text / run_shell / web_fetch)
    -> write_file: 根据最终 content 生成单文件 diff
    -> apply_patch: 先在内存里应用 patch，再生成多文件 diff preview
    -> replace_text: 根据 old_text/new_text 生成单文件 diff，并记录匹配数量
-   -> run_shell: 不执行命令，只生成风险等级、blocked 状态、超时和输出上限
+   -> run_shell: 先生成风险预览并等待审批，批准且未命中 block 规则后执行命令
    -> web_fetch: 不访问网页，只校验 URL 并展示网络访问风险和大小限制
 -> Runtime 创建 effect_digest，绑定工具名、参数和 effect_preview
 -> Runtime 创建 pending approval

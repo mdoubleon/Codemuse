@@ -14,7 +14,7 @@ checkpoint before writes        高风险写入前创建 checkpoint
 workspace safe rewind           checkpoint 可恢复 workspace 文件
 shell safety policy             高风险 shell 命令会被 block/stale
 guarded web fetch               私有地址和本地地址会被阻止
-safe GitHub import MVP          prepare_repo_import 只生成计划，不 clone
+safe GitHub import MVP          prepare_repo_import 生成计划；明确批准后才执行本地 clone/import
 subagent allowlist              subagent 只能使用受控工具集合
 doctor strict gate              发布前可运行 compile/test/web/eval gate
 ```

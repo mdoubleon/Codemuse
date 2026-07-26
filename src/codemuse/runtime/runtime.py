@@ -13,6 +13,10 @@ from codemuse.domain.tools import ToolCall
 from codemuse.llm.provider.base import LLMProvider
 from codemuse.memory.retrieval_hook import MemoryContextProvider
 from codemuse.runtime.events import AgentEvent
+from codemuse.runtime.compaction import ConversationCompactor
+from codemuse.runtime.emitter import LifecycleEmitter
+from codemuse.runtime.hooks import RuntimeHooks
+from codemuse.runtime.turn_loop import TurnController
 from codemuse.runtime.git_checkpoint import WorkspaceSnapshotManager
 from codemuse.runtime.safe_rewind import SafeRewindOrchestrator
 from codemuse.runtime.state import AgentState
@@ -44,6 +48,10 @@ class AgentRuntime:
         policy_evaluator: ToolPolicyEvaluator | None = None,
         max_turns: int = 15,
         history_token_budget: int = 16000,
+        hooks: RuntimeHooks | None = None,
+        emitter: LifecycleEmitter | None = None,
+        turn_controller: TurnController | None = None,
+        compactor: ConversationCompactor | None = None,
     ) -> None:
         """注入模型、工具注册表、存储和可选记忆/审批/检查点组件，恢复会话状态。"""
         self.workspace = workspace.resolve()
@@ -57,8 +65,13 @@ class AgentRuntime:
         self.policy_evaluator = policy_evaluator or ToolPolicyEvaluator()
         self.max_turns = max_turns
         self.history_token_budget = history_token_budget
+        self.emitter = emitter or LifecycleEmitter()
+        self.hooks = hooks or RuntimeHooks()
+        self.turn_controller = turn_controller or TurnController()
+        self.compactor = compactor or ConversationCompactor(threshold_tokens=max(256, int(history_token_budget * 1.25)))
+        self.hooks.register_with_lifecycle(self.emitter)
         self.session = session
-        self.state = AgentState(session_id=session.session_id, system_prompt=session.system_prompt, messages=session.messages)
+        self.state = AgentState(session_id=session.session_id, system_prompt=session.system_prompt, messages=session.messages, queued_messages=list(session.queued_messages))
         self._subscribers: list[Subscriber] = []
         self._cancel_event = threading.Event()
         self._restore_pending_tool_calls()
@@ -80,11 +93,38 @@ class AgentRuntime:
         """返回当前是否有取消请求挂起。"""
         return self._cancel_event.is_set()
 
+    def enqueue_message(self, text: str, *, delivery: str = "follow_up") -> None:
+        """Queue steering/follow-up input for the next available turn."""
+        clean = text.strip()
+        if not clean:
+            raise ValueError("Queued message cannot be empty.")
+        from codemuse.runtime.state import QueuedMessage
+        self.state.queued_messages.append(QueuedMessage(clean, delivery=delivery))
+        self._emit("queue_enqueued", [], message=clean, details={"delivery": delivery, "queue_size": len(self.state.queued_messages)})
+        self._persist()
+
+    def compact(self) -> dict[str, Any]:
+        """Compact persisted history and return a small operation report."""
+        captured: list[AgentEvent] = []
+        before = len(self.state.messages)
+        self._emit("session_before_compact", captured, details={"message_count": before})
+        decision = self.emitter.emit_session_before_compact(captured[-1]) if captured else None
+        if decision is not None and not decision.allow:
+            return {"compacted": False, "removed_messages": 0, "message_count": before, "reason": "blocked_by_hook"}
+        result = self.compactor.compact(self.state.messages, self._estimate_messages_tokens)
+        if result.compacted:
+            self.state.messages = result.messages
+            self._persist()
+            self._emit("session_compacted", captured, message=result.summary[:500], details=result.to_dict())
+        return {**result.to_dict(), "message_count": len(self.state.messages)}
+
     def prompt(self, text: str) -> list[AgentEvent]:
         """接收用户输入并驱动 Agent 执行一轮任务。"""
         if self._restore_pending_tool_calls():
             raise RuntimeError("Cannot start a new prompt while this session has pending tool approvals.")
         self.state.messages.append(ChatMessage.text("user", text))
+        if self.compactor.should_compact(self.state.messages, self._estimate_messages_tokens):
+            self.compact()
         return self._run_loop()
 
     def create_checkpoint(self, label: str = "manual checkpoint") -> list[AgentEvent]:
@@ -210,11 +250,27 @@ class AgentRuntime:
                 if self._cancel_event.is_set():
                     cancelled = True
                     break
+                if self.state.queued_messages:
+                    queued = self.state.queued_messages.pop(0)
+                    self.state.messages.append(ChatMessage.text("user", queued.text))
+                    self._emit("queue_dequeued", captured, message=queued.text, details={"delivery": queued.delivery, "queue_size": len(self.state.queued_messages)})
                 turns += 1
                 self.state.turn_id += 1
                 self.state.phase = "planning"
                 self._emit("turn_start", captured, details={"turn_id": self.state.turn_id})
-                response = self.llm.complete(self._messages_for_model(), self.tool_registry.specs())
+                model_messages = self._messages_for_model()
+                request_event = AgentEvent(type="before_provider_request", session_id=self.session_id, turn_id=self.state.turn_id, phase=self.state.phase)
+                request = self.emitter.emit_before_provider_request(request_event, self.state, model_messages, self.tool_registry.specs())
+                request_messages = request.messages if request.messages is not None else model_messages
+                request_tools = request.tools if request.tools is not None else self.tool_registry.specs()
+                self._emit("before_provider_request", captured, details={"message_count": len(request_messages), "tool_count": len(request_tools)})
+                response = self.llm.complete(request_messages, request_tools)
+                response_event = AgentEvent(type="provider_response", session_id=self.session_id, turn_id=self.state.turn_id, phase=self.state.phase)
+                response_decision = self.emitter.emit_provider_response(response_event, response.text, response.tool_calls)
+                if response_decision.assistant_text is not None:
+                    response.text = response_decision.assistant_text
+                if response_decision.tool_calls is not None:
+                    response.tool_calls = response_decision.tool_calls
                 if response.text:
                     self.state.messages.append(ChatMessage.text("assistant", response.text))
                     self._emit("message", captured, message=response.text)
@@ -228,6 +284,11 @@ class AgentRuntime:
                             cancelled = True
                             break
                         self._emit("tool_call", captured, tool_name=call.name, details={"arguments": call.arguments})
+                        hook_decision = self.emitter.emit_tool_call(captured[-1], self.state, call, self.tool_registry)
+                        if hook_decision.action == "deny":
+                            self._append_tool_error(call, hook_decision.message or "Tool call blocked by runtime hook.")
+                            self._emit("tool_error", captured, tool_name=call.name, message=hook_decision.message or "Tool call blocked by runtime hook.", is_error=True)
+                            continue
                         decision = self._policy_decision(call)
                         if decision.action == DENY:
                             self._append_tool_error(call, decision.reason)
@@ -256,10 +317,14 @@ class AgentRuntime:
                             self._checkpoint_before_tool(call, captured)
                             result = self.tool_registry.execute(call.name, call.arguments)
                             result.tool_call_id = call.id
+                            result_decision = self.emitter.emit_tool_result(captured[-1], self.state, call, result)
+                            if result_decision.result is not None:
+                                result = result_decision.result
                             self.state.messages.append(result.as_chat_message())
                             self._emit("tool_result", captured, tool_name=call.name, message=result.content[:500], details=result.details)
                         except Exception as exc:  # noqa: BLE001 - phase 1 records tool failures as observations
                             error_text = str(exc)
+                            error_decision = self.emitter.emit_tool_error(captured[-1], self.state, call, exc)
                             self._append_tool_error(call, error_text)
                             self._emit("tool_error", captured, tool_name=call.name, message=error_text, is_error=True)
                     if cancelled:
@@ -270,7 +335,7 @@ class AgentRuntime:
                         continue
                     keep_running = True
                     continue
-                keep_running = False
+                keep_running = bool(self.state.queued_messages)
                 self._emit("turn_end", captured, details={"turn_id": self.state.turn_id})
         finally:
             if cancelled:
@@ -297,6 +362,10 @@ class AgentRuntime:
         messages.extend(self._tool_protocol_safe_history(token_budget=self.history_token_budget))
         if self.memory_provider is not None:
             messages = self.memory_provider.transform_context(self.state, messages)
+        built = AgentEvent(type="context_built", session_id=self.session_id, turn_id=self.state.turn_id, phase=self.state.phase)
+        transformed = self.emitter.emit_context_built(built, self.state, messages).messages
+        if transformed is not None:
+            messages = transformed
         return messages
 
     def _tool_protocol_safe_history(self, *, token_budget: int) -> list[ChatMessage]:
@@ -650,6 +719,7 @@ class AgentRuntime:
         """把当前会话的系统提示和消息历史写入 SessionStore。"""
         self.session.system_prompt = self.state.system_prompt
         self.session.messages = self.state.messages
+        self.session.queued_messages = list(self.state.queued_messages)
         self.session_store.save(self.session)
 
     def _emit(
@@ -674,6 +744,7 @@ class AgentRuntime:
             is_error=is_error,
         )
         captured.append(event)
+        self.emitter.emit(event)
         if self.timeline_store is not None:
             self.timeline_store.append(event)
         for subscriber in self._subscribers:
