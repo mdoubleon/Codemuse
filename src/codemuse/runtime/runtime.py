@@ -1,6 +1,7 @@
 """实现 Agent 主循环：组装上下文、调用模型、安全执行工具并保存会话。"""
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -42,6 +43,7 @@ class AgentRuntime:
         timeline_store: TimelineStore | None = None,
         policy_evaluator: ToolPolicyEvaluator | None = None,
         max_turns: int = 15,
+        history_token_budget: int = 16000,
     ) -> None:
         """注入模型、工具注册表、存储和可选记忆/审批/检查点组件，恢复会话状态。"""
         self.workspace = workspace.resolve()
@@ -54,6 +56,7 @@ class AgentRuntime:
         self.timeline_store = timeline_store
         self.policy_evaluator = policy_evaluator or ToolPolicyEvaluator()
         self.max_turns = max_turns
+        self.history_token_budget = history_token_budget
         self.session = session
         self.state = AgentState(session_id=session.session_id, system_prompt=session.system_prompt, messages=session.messages)
         self._subscribers: list[Subscriber] = []
@@ -290,18 +293,111 @@ class AgentRuntime:
     def _messages_for_model(self) -> list[ChatMessage]:
         """构造发给模型的上下文，并在调用前注入相关长期记忆。"""
         messages = [ChatMessage.text("system", self.state.system_prompt)]
-        messages.extend(self._tool_protocol_safe_history(limit=20))
+        messages.extend(self._tool_protocol_safe_history(token_budget=self.history_token_budget))
         if self.memory_provider is not None:
             messages = self.memory_provider.transform_context(self.state, messages)
         return messages
 
-    def _tool_protocol_safe_history(self, *, limit: int) -> list[ChatMessage]:
-        """截取最近对话时保留 OpenAI tool_calls/tool 响应的配对关系。"""
-        history = self.state.messages
-        start = max(0, len(history) - limit)
-        while start > 0 and history[start].role == "tool":
-            start -= 1
-        return self._sanitize_tool_protocol(history[start:])
+    def _tool_protocol_safe_history(self, *, token_budget: int) -> list[ChatMessage]:
+        """按估算 token 预算截取历史，并保留 OpenAI 工具调用协议的完整单元。"""
+        selected: list[list[ChatMessage]] = []
+        remaining = token_budget
+        for unit in reversed(self._history_units(self.state.messages)):
+            safe_unit = self._sanitize_tool_protocol(unit)
+            if not safe_unit:
+                continue
+            estimated = self._estimate_messages_tokens(safe_unit)
+            if estimated <= remaining:
+                selected.append(safe_unit)
+                remaining -= estimated
+                continue
+            if not selected:
+                selected.append(self._truncate_unit_to_budget(safe_unit, token_budget))
+            # 保持一段连续的最近历史；遇到第一个放不下的旧单元后停止向前扩展。
+            break
+        return [message for unit in reversed(selected) for message in unit]
+
+    @staticmethod
+    def _history_units(history: list[ChatMessage]) -> list[list[ChatMessage]]:
+        """将 assistant tool_calls 与其连续的 tool 响应组合为不可拆分的上下文单元。"""
+        units: list[list[ChatMessage]] = []
+        index = 0
+        while index < len(history):
+            message = history[index]
+            if message.role == "assistant" and message.tool_calls:
+                next_index = index + 1
+                while next_index < len(history) and history[next_index].role == "tool":
+                    next_index += 1
+                units.append(history[index:next_index])
+                index = next_index
+                continue
+            units.append([message])
+            index += 1
+        return units
+
+    def _truncate_unit_to_budget(self, messages: list[ChatMessage], token_budget: int) -> list[ChatMessage]:
+        """保留最近单元的协议字段，仅截断其文本内容以接近预算。"""
+        if len(messages) == 1 and messages[0].role == "user":
+            # 当前用户输入是本轮任务边界，宁可软性超预算也不能截成不完整指令。
+            return messages
+        overhead = sum(self._estimate_message_tokens(message, include_content=False) for message in messages)
+        text_budget = max(0, token_budget - overhead)
+        text_sizes = [self._estimate_text_tokens(message.text_content()) for message in messages]
+        truncated: list[ChatMessage] = []
+        remaining = text_budget
+        for index, message in enumerate(messages):
+            remaining_messages = len(messages) - index
+            share = min(text_sizes[index], max(0, remaining // remaining_messages))
+            truncated.append(self._truncate_message_text(message, share))
+            remaining -= share
+        return truncated
+
+    @classmethod
+    def _truncate_message_text(cls, message: ChatMessage, token_budget: int) -> ChatMessage:
+        """复制消息并将正文截断到近似 token 预算，保留工具调用标识。"""
+        text = message.text_content()
+        if cls._estimate_text_tokens(text) <= token_budget:
+            return message
+        if token_budget <= 0:
+            shortened = "[truncated]"
+        else:
+            ratio = min(1.0, token_budget / max(1, cls._estimate_text_tokens(text)))
+            limit = max(1, int(len(text) * ratio) - len("\n[truncated]"))
+            shortened = f"{text[:limit]}\n[truncated]"
+        return ChatMessage(
+            role=message.role,
+            content=[TextPart(text=shortened)],
+            tool_call_id=message.tool_call_id,
+            tool_name=message.tool_name,
+            tool_calls=list(message.tool_calls),
+            metadata=dict(message.metadata),
+            timestamp=message.timestamp,
+        )
+
+    @classmethod
+    def _estimate_messages_tokens(cls, messages: list[ChatMessage]) -> int:
+        """返回消息列表的保守 token 估算值，不依赖特定模型的 tokenizer。"""
+        return sum(cls._estimate_message_tokens(message) for message in messages)
+
+    @classmethod
+    def _estimate_message_tokens(cls, message: ChatMessage, *, include_content: bool = True) -> int:
+        """估算单条消息正文及工具调用结构占用的 token。"""
+        tokens = 4 + cls._estimate_text_tokens(message.tool_name or "")
+        if message.tool_call_id:
+            tokens += cls._estimate_text_tokens(message.tool_call_id)
+        for call in message.tool_calls:
+            tokens += cls._estimate_text_tokens(call.name)
+            tokens += cls._estimate_text_tokens(json.dumps(call.arguments, ensure_ascii=False, sort_keys=True))
+        if include_content:
+            tokens += cls._estimate_text_tokens(message.text_content())
+        return tokens
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        """用 ASCII 每四字符、非 ASCII 每字符的保守规则估算 token 数。"""
+        ascii_chars = sum(1 for char in text if ord(char) < 128)
+        non_ascii_chars = len(text) - ascii_chars
+        return (ascii_chars + 3) // 4 + non_ascii_chars
 
     def _sanitize_tool_protocol(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """移除或降级孤立 tool 消息，避免发送给模型的上下文违反工具调用协议。"""

@@ -40,6 +40,7 @@ class ModelConfig:
 class RuntimeConfig:
     """RuntimeConfig：保存该能力运行需要的配置字段。"""
     max_turns: int = 8
+    history_token_budget: int = 16000
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "RuntimeConfig":
@@ -47,11 +48,14 @@ class RuntimeConfig:
         max_turns = int(payload.get("max_turns", 8))
         if max_turns < 1 or max_turns > 50:
             raise ConfigValidationError("runtime.max_turns must be between 1 and 50.")
-        return cls(max_turns=max_turns)
+        history_token_budget = int(payload.get("history_token_budget", 16000))
+        if history_token_budget < 256 or history_token_budget > 128000:
+            raise ConfigValidationError("runtime.history_token_budget must be between 256 and 128000.")
+        return cls(max_turns=max_turns, history_token_budget=history_token_budget)
 
     def to_dict(self) -> dict[str, Any]:
         """把 RuntimeConfig 转成可写入文件或 API 响应的字典。"""
-        return {"max_turns": self.max_turns}
+        return {"max_turns": self.max_turns, "history_token_budget": self.history_token_budget}
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,7 @@ class CodeMuseConfig:
         runtime_payload = _object_value(data.get("runtime", {}), "runtime")
         capabilities_payload = _object_value(data.get("capabilities", {}), "capabilities")
         _reject_unknown_keys(model_payload, {"provider", "model", "base_url", "api_key_env"}, "model")
-        _reject_unknown_keys(runtime_payload, {"max_turns"}, "runtime")
+        _reject_unknown_keys(runtime_payload, {"max_turns", "history_token_budget"}, "runtime")
         _reject_unknown_keys(
             capabilities_payload,
             {
@@ -177,6 +181,14 @@ def config_schema() -> dict[str, Any]:
                 "minimum": 1,
                 "maximum": 50,
                 "description": "Maximum ReAct loop turns per prompt.",
+            },
+            {
+                "path": "runtime.history_token_budget",
+                "type": "integer",
+                "default": 16000,
+                "minimum": 256,
+                "maximum": 128000,
+                "description": "Approximate token budget for persisted conversation history sent to the model.",
             },
             {
                 "path": "capabilities.mcp_enabled",

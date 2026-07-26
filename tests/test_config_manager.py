@@ -25,11 +25,15 @@ class ConfigManagerTests(unittest.TestCase):
             root = Path(raw)
             _write_sample_repo(root)
             _write_mcp_config(root)
-            _write_config(root, {"runtime": {"max_turns": 3}, "capabilities": {"mcp_enabled": False}})
+            _write_config(
+                root,
+                {"runtime": {"max_turns": 3, "history_token_budget": 4096}, "capabilities": {"mcp_enabled": False}},
+            )
 
             agent = build_agent(root)
 
             self.assertEqual(agent.max_turns, 3)
+            self.assertEqual(agent.history_token_budget, 4096)
             self.assertNotIn("mcp__demo__echo", agent.tool_registry.names())
 
     def test_sdk_reads_and_updates_config(self) -> None:
@@ -67,6 +71,13 @@ class ConfigManagerTests(unittest.TestCase):
 
             with self.assertRaises(ConfigValidationError):
                 sdk.set_config_path(root, "runtime.not_real", 1)
+
+    def test_history_token_budget_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+
+            with self.assertRaises(ConfigValidationError):
+                sdk.set_config_path(root, "runtime.history_token_budget", 128)
 
 
 def _write_sample_repo(root: Path) -> None:

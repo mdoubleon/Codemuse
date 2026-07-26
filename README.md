@@ -106,9 +106,15 @@ CODEMUSE_MODEL=gpt-4o-mini
     "base_url": "https://api.openai.com/v1",
     "model": "gpt-4o-mini",
     "api_key_env": "CODEMUSE_API_KEY"
+  },
+  "runtime": {
+    "max_turns": 8,
+    "history_token_budget": 16000
   }
 }
 ```
+
+`runtime.history_token_budget` 控制每次模型调用携带的持久化对话历史，替代固定消息条数窗口。CodeMuse 从最新消息向前选择完整上下文单元，工具输出过长时截断正文但保留 tool-call/tool-result 配对；当前用户输入始终完整保留。该预算不包含 system prompt、工具 schema 和当轮注入的长期记忆。
 
 真实 API Key 不应该写进前端文件，也不应该提交到 GitHub。
 

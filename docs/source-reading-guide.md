@@ -63,7 +63,7 @@ CLI / SDK / Web
 
 ## src/codemuse/runtime
 
-- `runtime/runtime.py`：Agent 主循环。负责接收用户输入、调用模型、处理工具调用、审批暂停、checkpoint、保存 session、发布 timeline event。
+- `runtime/runtime.py`：Agent 主循环。负责接收用户输入、按 token budget 组装协议完整的历史上下文、调用模型、处理工具调用、审批暂停、checkpoint、保存 session、发布 timeline event。
 - `runtime/state.py`：Runtime 当前状态，包括 messages、turn_id、phase、pending tool calls。
 - `runtime/events.py`：AgentEvent 结构，给 CLI/Web/timeline 观察运行过程。
 - `runtime/git_checkpoint.py`：workspace 文件快照创建与恢复。

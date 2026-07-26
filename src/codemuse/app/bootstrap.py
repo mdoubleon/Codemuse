@@ -116,5 +116,6 @@ def build_agent(workspace: Path, *, session_id: str | None = None) -> AgentRunti
         checkpoint_store=checkpoint_store,
         timeline_store=timeline_store,
         max_turns=config.runtime.max_turns,
+        history_token_budget=config.runtime.history_token_budget,
     )
 
