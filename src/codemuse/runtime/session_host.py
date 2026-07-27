@@ -59,13 +59,19 @@ class SessionHost:
         self._emit(runtime, SESSION_RESTORE, lifecycle_subscribers, {"restored": True})
         return runtime
 
-    def fork_session(self, workspace: Path, session_id: str, *, lifecycle_subscribers: list[LifecycleSubscriber] | None = None, **_: Any) -> ForkResult:
+    def fork_session(self, workspace: Path, session_id: str, *, head_id: str | None = None, lifecycle_subscribers: list[LifecycleSubscriber] | None = None, **_: Any) -> ForkResult:
         store = self._store(workspace)
-        child = store.fork(session_id)
+        child = store.fork_from_head(session_id, head_id) if head_id else store.fork(session_id)
         store.save(child)
         event = AgentEvent(type=SESSION_FORKED, session_id=child.session_id, details={"source_session_id": session_id})
         for subscriber in lifecycle_subscribers or []: subscriber(event)
         return ForkResult(source_session_id=session_id, session_id=child.session_id)
+
+    def navigate_tree(self, workspace: Path, session_id: str, target_head_id: str, *, lifecycle_subscribers: list[LifecycleSubscriber] | None = None) -> dict[str, Any]:
+        record = self._store(workspace).set_active_head(session_id, target_head_id)
+        event = AgentEvent(type="session_tree_navigated", session_id=session_id, details={"active_head_id": record.active_head_id})
+        for subscriber in lifecycle_subscribers or []: subscriber(event)
+        return {"session_id": session_id, "active_head_id": record.active_head_id}
 
     def list_sessions(self, workspace: Path) -> list[dict[str, Any]]:
         return [record.to_dict() for record in self._store(workspace).list()]

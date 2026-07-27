@@ -95,7 +95,7 @@ Runtime 是 Agent 的发动机，核心逻辑在 `src/codemuse/runtime/runtime.p
 1. 保存用户消息
 2. _messages_for_model() 构造模型上下文
 3. memory_provider.transform_context(...) 注入记忆
-4. llm.complete(messages, tool_specs) 调模型
+4. LLMProvider.stream/complete(messages, tool_specs) 调模型并产生增量事件
 5. 如果模型直接回答：保存 assistant message，结束
 6. 如果模型返回 ToolCall：进入工具执行流程
 7. 工具结果变成 role="tool" 的 ChatMessage
@@ -161,7 +161,7 @@ tools/shell_tool.py       run_shell
 web_tools/tools.py        web_fetch
 tools/repo_tools.py       index_repo_structure / analyze_repo_blueprint / save_blueprint_memory / search_blueprint_memory / prepare_repo_import / build_project_plan
 memory/file_memory_tools.py save_project_memory / search_project_memory
-tools/subagent_tool.py    spawn_subagent
+tools/subagent_tool.py    spawn_subagent / run_subagent_plan / orchestrate_agents
 mcp/adapter.py            MCP 工具适配成普通工具
 ```
 

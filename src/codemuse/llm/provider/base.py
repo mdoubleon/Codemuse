@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from collections.abc import Iterator
+from typing import Any, Protocol
 
 from codemuse.domain.messages import ChatMessage
 from codemuse.domain.tools import ToolSpec
-from codemuse.llm.models import LLMResponse
+from codemuse.llm.models import LLMResponse, LLMStreamChunk
 
 
 @dataclass(frozen=True)
@@ -29,3 +30,19 @@ class LLMProvider(Protocol):
     def complete(self, messages: list[ChatMessage], tools: list[ToolSpec]) -> LLMResponse:
         """根据 messages 和 tools 生成模型回复或工具调用。"""
         ...
+
+
+def iter_provider_stream(provider: Any, messages: list[ChatMessage], tools: list[ToolSpec]) -> Iterator[LLMStreamChunk]:
+    """Normalize native streams and legacy complete-only providers."""
+    stream = getattr(provider, "stream", None)
+    if stream is None:
+        response = provider.complete(messages, tools)
+        yield LLMStreamChunk(text=response.text, tool_calls=response.tool_calls, usage=response.usage, provider_metadata=response.provider_metadata, done=True)
+        return
+    for item in stream(messages, tools):
+        if isinstance(item, LLMStreamChunk):
+            yield item
+        elif isinstance(item, LLMResponse):
+            yield LLMStreamChunk(text=item.text, tool_calls=item.tool_calls, usage=item.usage, provider_metadata=item.provider_metadata, done=True)
+        elif isinstance(item, str):
+            yield LLMStreamChunk(text=item)

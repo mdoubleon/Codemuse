@@ -64,7 +64,7 @@ class MCPManager:
         for server_name in self.server_names():
             try:
                 tools.extend(self.list_mcp_tools(server_name))
-            except NotImplementedError:
+            except Exception:
                 # Stage 8 只支持 mock transport；真实 stdio/http 后续再接入。
                 continue
         return tools

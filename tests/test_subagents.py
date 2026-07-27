@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 from codemuse.app.bootstrap import build_agent
 from codemuse.storage.sessions import SessionStore
 from codemuse.subagents.manager import SubAgentManager
+from codemuse.subagents.task_graph import TaskGraph, TaskNode
 
 
 class SubAgentTests(unittest.TestCase):
@@ -64,7 +65,27 @@ class SubAgentTests(unittest.TestCase):
             self.assertEqual(len(tool_results), 1)
             payload = tool_results[0].details["subagent_plan"]
             self.assertEqual(payload["task_count"], 2)
+            self.assertTrue(payload["parallel"])
             self.assertIn("list_files", payload["used_tools"])
+
+    def test_task_graph_rejects_cycles_and_orders_dependencies(self) -> None:
+        graph = TaskGraph([
+            TaskNode("a", "repo-researcher", "research"),
+            TaskNode("b", "repo-researcher", "review", ["a"]),
+        ])
+        self.assertEqual([[node.node_id for node in batch] for batch in graph.batches()], [["a"], ["b"]])
+        with self.assertRaises(ValueError):
+            TaskGraph([TaskNode("a", "repo-researcher", "a", ["b"]), TaskNode("b", "repo-researcher", "b", ["a"])])
+
+    def test_orchestrate_agents_exposes_blackboard(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            agent = build_agent(root)
+            result = agent.tool_registry.execute("orchestrate_agents", {"goal": "inspect repository", "workflow": "research"})
+            payload = result.details["orchestration"]
+            self.assertTrue(payload["success"])
+            self.assertEqual(set(payload["blackboard"]), {"memory", "repo", "api"})
 
 
 def _write_sample_repo(root: Path) -> None:

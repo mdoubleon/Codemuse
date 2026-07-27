@@ -25,6 +25,8 @@ class SessionRecord:
     depth: int = 0
     forked_at_message: int | None = None
     queued_messages: list[QueuedMessage] = field(default_factory=list)
+    active_head_id: str | None = None
+    turns: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """规范化树关系，让旧版记录自动成为根节点。"""
@@ -48,6 +50,8 @@ class SessionRecord:
             "depth": self.depth,
             "forked_at_message": self.forked_at_message,
             "queued_messages": [message.__dict__ for message in self.queued_messages],
+            "active_head_id": self.active_head_id,
+            "turns": list(self.turns),
         }
 
     @classmethod
@@ -64,6 +68,8 @@ class SessionRecord:
             depth=max(0, int(payload.get("depth") or 0)),
             forked_at_message=int(payload["forked_at_message"]) if payload.get("forked_at_message") is not None else None,
             queued_messages=[QueuedMessage(text=str(item.get("text") or ""), delivery=str(item.get("delivery") or "follow_up")) for item in (payload.get("queued_messages") if isinstance(payload.get("queued_messages"), list) else []) if isinstance(item, dict) and str(item.get("text") or "").strip()],
+            active_head_id=str(payload["active_head_id"]) if payload.get("active_head_id") else None,
+            turns=[dict(item) for item in (payload.get("turns") if isinstance(payload.get("turns"), list) else []) if isinstance(item, dict)],
         )
 
 
@@ -92,7 +98,35 @@ class SessionStore:
             depth=parent.depth + 1,
             forked_at_message=len(messages),
             queued_messages=[QueuedMessage(item.text, item.delivery) for item in parent.queued_messages],
+            active_head_id=parent.active_head_id,
+            turns=[dict(item) for item in parent.turns],
         )
+
+    def fork_from_head(self, parent_session_id: str, head_id: str) -> SessionRecord:
+        """Fork a session from a persisted turn head."""
+        parent = self.load(parent_session_id)
+        node = next((item for item in parent.turns if item.get("turn_node_id") == head_id), None)
+        if node is None:
+            raise ValueError(f"Unknown turn head: {head_id}")
+        message_count = max(0, min(len(parent.messages), int(node.get("message_count") or 0)))
+        child = self.fork(parent_session_id)
+        child.messages = [ChatMessage.from_dict(message.to_dict()) for message in parent.messages[:message_count]]
+        child.turns = [dict(item) for item in parent.turns if float(item.get("started_at") or 0) <= float(node.get("started_at") or 0)]
+        child.active_head_id = head_id
+        child.forked_at_message = message_count
+        return child
+
+    def set_active_head(self, session_id: str, head_id: str) -> SessionRecord:
+        """Navigate a session to a persisted turn head and save the view."""
+        record = self.load(session_id)
+        node = next((item for item in record.turns if item.get("turn_node_id") == head_id), None)
+        if node is None:
+            raise ValueError(f"Unknown turn head: {head_id}")
+        message_count = max(0, min(len(record.messages), int(node.get("message_count") or 0)))
+        record.messages = [ChatMessage.from_dict(message.to_dict()) for message in record.messages[:message_count]]
+        record.active_head_id = head_id
+        self.save(record)
+        return record
 
     def save(self, record: SessionRecord) -> None:
         """将对象写入本地存储。"""

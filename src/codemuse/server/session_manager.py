@@ -10,6 +10,7 @@ from typing import Any
 
 from codemuse.app.bootstrap import build_agent
 from codemuse.runtime.events import AgentEvent
+from codemuse.runtime.session_host import SessionHost
 from codemuse.runtime.runtime import AgentRuntime
 from codemuse.storage.sessions import SessionRecord, SessionStore, build_session_tree
 
@@ -47,6 +48,17 @@ class SessionHandle:
         if not clean:
             raise ValueError("Prompt cannot be empty.")
         return self._queue_job("prompt", {"text": clean})
+
+    def enqueue_message(self, text: str, *, delivery: str = "follow_up") -> str:
+        """Queue steering input behind the session worker."""
+        clean = text.strip()
+        if not clean:
+            raise ValueError("Queued message cannot be empty.")
+        return self._queue_job("enqueue", {"text": clean, "delivery": delivery})
+
+    def compact(self) -> str:
+        """Queue a persisted conversation compaction operation."""
+        return self._queue_job("compact", {})
 
     def approve(self, approval_id: str) -> str:
         """批准一个等待中的工具调用，并让 Runtime 继续执行。"""
@@ -123,6 +135,8 @@ class SessionHandle:
             "root_session_id": self.runtime.session.root_session_id,
             "depth": self.runtime.session.depth,
             "forked_at_message": self.runtime.session.forked_at_message,
+            "active_head_id": self.runtime.session.active_head_id,
+            "turns": list(self.runtime.session.turns),
             "pending_jobs": pending_jobs,
             "state": self.runtime.state.to_dict(),
         }
@@ -164,6 +178,12 @@ class SessionHandle:
         """把 SessionJob 分发到 Runtime 对应的方法。"""
         if job.action == "prompt":
             self.runtime.prompt(str(job.payload["text"]))
+            return
+        if job.action == "enqueue":
+            self.runtime.enqueue_message(str(job.payload["text"]), delivery=str(job.payload.get("delivery") or "follow_up"))
+            return
+        if job.action == "compact":
+            self.runtime.compact()
             return
         if job.action == "approve":
             self.runtime.approve(str(job.payload["approval_id"]))
@@ -263,6 +283,7 @@ class WebSessionManager:
     def __init__(self, *, default_workspace: Path) -> None:
         """记录默认工作区，并初始化会话句柄表。"""
         self.default_workspace = default_workspace.resolve()
+        self.session_host = SessionHost()
         self._handles: dict[str, SessionHandle] = {}
         self._lock = threading.Lock()
 
@@ -283,7 +304,7 @@ class WebSessionManager:
             handle.close()
         return resolved
 
-    def create_session(self, *, workspace: Path | None = None, parent_session_id: str | None = None) -> SessionHandle:
+    def create_session(self, *, workspace: Path | None = None, parent_session_id: str | None = None, head_id: str | None = None) -> SessionHandle:
         """为指定 workspace 构建 AgentRuntime，并用 SessionHandle 管理它。"""
         resolved_workspace = (workspace or self.default_workspace).resolve()
         if parent_session_id:
@@ -293,12 +314,10 @@ class WebSessionManager:
                 parent_snapshot = parent_handle.snapshot()
                 if parent_snapshot["pending_jobs"] or parent_snapshot["state"]["is_running"]:
                     raise ValueError("Cannot fork a session while it is running or has queued jobs.")
-            store = SessionStore(resolved_workspace / ".data" / "codemuse" / "sessions")
-            child = store.fork(parent_session_id)
-            store.save(child)
-            runtime = build_agent(resolved_workspace, session_id=child.session_id)
+            fork = self.session_host.fork_session(resolved_workspace, parent_session_id, head_id=head_id)
+            runtime = self.session_host.restore_session(resolved_workspace, fork.session_id)
         else:
-            runtime = build_agent(resolved_workspace)
+            runtime = self.session_host.create_session(resolved_workspace)
         handle = SessionHandle(runtime)
         with self._lock:
             self._handles[handle.session_id] = handle
@@ -310,7 +329,7 @@ class WebSessionManager:
             handle = self._handles.get(session_id)
         if handle is None:
             # HTTP 客户端只知道 session_id；真正的 Agent 状态仍由 Runtime 和本地 SessionStore 恢复。
-            runtime = build_agent(self.default_workspace, session_id=session_id)
+            runtime = self.session_host.restore_session(self.default_workspace, session_id)
             handle = SessionHandle(runtime)
             with self._lock:
                 self._handles[session_id] = handle
@@ -360,4 +379,6 @@ def _lineage_payload(record: SessionRecord) -> dict[str, Any]:
         "root_session_id": record.root_session_id,
         "depth": record.depth,
         "forked_at_message": record.forked_at_message,
+        "active_head_id": record.active_head_id,
+        "turns": list(record.turns),
     }

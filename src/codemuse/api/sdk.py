@@ -5,7 +5,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from codemuse.app.bootstrap import build_agent
 from codemuse.app.bootstrap import create_capability_catalog
 from codemuse.capabilities.descriptor import CapabilityKind
 from codemuse.config.manager import get_config_manager
@@ -14,6 +13,7 @@ from codemuse.llm.registry import provider_readiness
 from codemuse.memory.index_pipeline import format_memory_pipeline_search, refresh_memory_index, search_memory_pipeline
 from codemuse.runtime.events import AgentEvent
 from codemuse.runtime.runtime import AgentRuntime
+from codemuse.runtime.session_host import SessionHost
 from codemuse.storage.approvals import PendingApprovalStore
 from codemuse.storage.checkpoints import CheckpointStore
 from codemuse.storage.sessions import SessionStore, build_session_tree
@@ -31,7 +31,8 @@ def create_runtime(
 ) -> AgentRuntime:
     """为 SDK 调用者创建或恢复 Runtime，并挂载事件订阅回调。"""
 
-    runtime = build_agent(workspace, session_id=session_id)
+    host = SessionHost()
+    runtime = host.restore_session(workspace, session_id) if session_id else host.create_session(workspace)
     # SDK 是外部调用入口；订阅事件后，调用方可以像 Web/CLI 一样观察 Agent 运行过程。
     for callback in _merge_subscribers(subscriber=subscriber, subscribers=subscribers):
         runtime.subscribe(callback)

@@ -173,9 +173,10 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
                 workspace_value = str(payload.get("workspace") or "").strip()
                 workspace = Path(workspace_value) if workspace_value else None
                 parent_session_id = str(payload.get("parent_session_id") or "").strip() or None
-                handle = self.server.manager.create_session(workspace=workspace, parent_session_id=parent_session_id)
+                head_id = str(payload.get("head_id") or "").strip() or None
+                handle = self.server.manager.create_session(workspace=workspace, parent_session_id=parent_session_id, head_id=head_id)
                 self._send_json(
-                    {"session_id": handle.session_id, "parent_session_id": parent_session_id},
+                    {"session_id": handle.session_id, "parent_session_id": parent_session_id, "head_id": head_id},
                     status=HTTPStatus.CREATED,
                 )
                 return
@@ -194,6 +195,16 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
                 handle = self.server.manager.get_session(parts[1])
                 job_id = handle.prompt(prompt)
                 self._send_json({"session_id": handle.session_id, "job_id": job_id}, status=HTTPStatus.ACCEPTED)
+                return
+            if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "enqueue":
+                text = str(payload.get("text") or payload.get("prompt") or "")
+                delivery = str(payload.get("delivery") or "follow_up")
+                job_id = self.server.manager.get_session(parts[1]).enqueue_message(text, delivery=delivery)
+                self._send_json({"session_id": parts[1], "job_id": job_id}, status=HTTPStatus.ACCEPTED)
+                return
+            if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "compact":
+                job_id = self.server.manager.get_session(parts[1]).compact()
+                self._send_json({"session_id": parts[1], "job_id": job_id}, status=HTTPStatus.ACCEPTED)
                 return
             if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "approve":
                 approval_id = str(payload.get("approval_id") or "")

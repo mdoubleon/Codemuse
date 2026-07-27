@@ -54,6 +54,18 @@ class RuntimeComponentTests(unittest.TestCase):
             self.assertEqual(fork.source_session_id, runtime.session_id)
             self.assertTrue(any(item["session_id"] == fork.session_id for item in host.list_sessions(root)))
 
+    def test_runtime_emits_stream_deltas_and_persists_turn_head(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "README.md").write_text("# demo", encoding="utf-8")
+            agent = build_agent(root)
+            events = agent.prompt("list files")
+            self.assertTrue(any(event.type == "message_delta" for event in events))
+            self.assertIsNotNone(agent.session.active_head_id)
+            restored = build_agent(root, session_id=agent.session_id)
+            self.assertEqual(restored.session.active_head_id, agent.session.active_head_id)
+            self.assertTrue(restored.session.turns)
+
 
 if __name__ == "__main__":
     unittest.main()

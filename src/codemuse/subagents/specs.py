@@ -92,4 +92,27 @@ def default_subagent_specs() -> dict[str, SubAgentSpec]:
         tool_allowlist=["list_files", "read_file", "search_text", "search_project_memory", "search_blueprint_memory"],
         max_turns=3,
     )
-    return {repo_researcher.name: repo_researcher}
+    def research(name: str, description: str, objective: str) -> SubAgentSpec:
+        return SubAgentSpec(
+            name=name,
+            description=description,
+            system_prompt=f"You are {name}, a bounded read-only subagent. {objective} Do not modify files or spawn other agents.",
+            tool_allowlist=repo_researcher.tool_allowlist,
+            max_turns=3,
+        )
+
+    specs = {
+        repo_researcher.name: repo_researcher,
+        "memory-scout": research("memory-scout", "Finds remembered project context.", "Search project memory and report only relevant durable facts."),
+        "api-scout": research("api-scout", "Traces public APIs and call sites.", "Inspect interfaces, routes, and call sites and identify compatibility risks."),
+        "implementation-planner": research("implementation-planner", "Turns evidence into an implementation plan.", "Use the supplied dependency context to propose a minimal ordered plan."),
+        "change-reviewer": research("change-reviewer", "Reviews risks and current changes.", "Inspect the repository diff and report regressions, missing tests, and risks."),
+        "code-worker": SubAgentSpec(
+            name="code-worker",
+            description="Scoped worker; edits require an isolated worktree and parent approval.",
+            system_prompt="You are code-worker. Prepare a scoped change in an isolated worktree; never edit the parent workspace directly.",
+            tool_allowlist=["list_files", "read_file", "search_text"],
+            max_turns=5,
+        ),
+    }
+    return specs

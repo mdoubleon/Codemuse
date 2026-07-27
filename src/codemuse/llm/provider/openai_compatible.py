@@ -12,7 +12,7 @@ from typing import Any
 
 from codemuse.domain.messages import ChatMessage
 from codemuse.domain.tools import ToolCall, ToolSpec
-from codemuse.llm.models import LLMResponse
+from codemuse.llm.models import LLMResponse, LLMStreamChunk
 from codemuse.llm.provider.base import LLMProviderInfo
 
 DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://api.openai.com/v1"
@@ -100,6 +100,76 @@ class OpenAICompatibleProvider:
             payload["tool_choice"] = "auto"
         response = self._post_chat_completions(payload, api_key=api_key)
         return _response_from_payload(response, provider=self.info.provider, model=self.model)
+
+    def stream(self, messages: list[ChatMessage], tools: list[ToolSpec]):
+        """Stream OpenAI-compatible SSE chat completions."""
+        api_key = os.environ.get(self.api_key_env)
+        if not api_key:
+            raise RuntimeError(f"Missing API key environment variable: {self.api_key_env}")
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [_message_to_payload(message) for message in messages],
+            "stream": True,
+        }
+        tool_payload = [_tool_to_payload(tool) for tool in tools if tool.model_callable]
+        if tool_payload:
+            payload["tools"] = tool_payload
+            payload["tool_choice"] = "auto"
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+        )
+        calls: dict[int, dict[str, str]] = {}
+        metadata: dict[str, Any] = {"provider": self.info.provider, "model": self.model}
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        payload_item = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    metadata["response_id"] = payload_item.get("id") or metadata.get("response_id", "")
+                    choice = (payload_item.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                    text = str(delta.get("content") or "")
+                    delta_calls = delta.get("tool_calls") or []
+                    for raw_call in delta_calls:
+                        index = int(raw_call.get("index") or 0)
+                        target = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                        target["id"] = target["id"] or str(raw_call.get("id") or "")
+                        function = raw_call.get("function") or {}
+                        target["name"] += str(function.get("name") or "")
+                        target["arguments"] += str(function.get("arguments") or "")
+                    if text:
+                        yield LLMStreamChunk(text=text, provider_metadata=dict(metadata))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            exc.close()
+            raise RuntimeError(f"Provider HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Provider request failed: {exc.reason}") from exc
+
+        tool_calls: list[ToolCall] = []
+        for item in calls.values():
+            try:
+                arguments = json.loads(item["arguments"] or "{}")
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Streamed tool arguments were not valid JSON: {item['arguments']}") from exc
+            tool_calls.append(ToolCall(id=item["id"] or str(uuid.uuid4()), name=item["name"], arguments=arguments))
+        yield LLMStreamChunk(tool_calls=tool_calls, provider_metadata=metadata, done=True)
 
     def _post_chat_completions(self, payload: dict[str, Any], *, api_key: str) -> dict[str, Any]:
         """处理 postchatcompletions。"""

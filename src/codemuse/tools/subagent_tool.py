@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from codemuse.subagents.manager import SubAgentManager
+from codemuse.subagents.orchestrator import SubAgentOrchestrator
 from codemuse.tools.base import BaseTool, ToolResult, ToolSpec
 
 
@@ -29,6 +30,8 @@ class SpawnSubAgentTool(BaseTool):
                     "agent": {"type": "string"},
                     "task": {"type": "string"},
                     "max_turns": {"type": "integer"},
+                    "parallel": {"type": "boolean"},
+                    "max_workers": {"type": "integer"},
                 },
                 "required": ["task"],
             },
@@ -91,6 +94,8 @@ class RunSubAgentPlanTool(BaseTool):
             spec_name=str(arguments.get("agent") or "repo-researcher"),
             tasks=tasks,
             max_turns=max_turns,
+            parallel=bool(arguments.get("parallel", True)),
+            max_workers=int(arguments.get("max_workers") or 4),
         )
         return ToolResult(
             tool_name=self.spec.name,
@@ -99,7 +104,52 @@ class RunSubAgentPlanTool(BaseTool):
         )
 
 
+class OrchestrateAgentsTool(BaseTool):
+    """Run an explicit bounded workflow with dependency-aware handoffs."""
+
+    def __init__(self, workspace: Path, manager: SubAgentManager) -> None:
+        super().__init__(workspace)
+        self.orchestrator = SubAgentOrchestrator(manager)
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="orchestrate_agents",
+            description="Run bounded research, debug, or code-change subagent workflows.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string"},
+                    "workflow": {"type": "string", "enum": ["research", "debug", "code_change"]},
+                    "max_agents": {"type": "integer"},
+                    "allow_edits": {"type": "boolean"},
+                },
+                "required": ["goal"],
+            },
+            permission_domain="read",
+            requires_confirmation=False,
+            side_effect=False,
+        )
+
+    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        goal = str(arguments.get("goal") or "").strip()
+        if not goal:
+            raise ValueError("orchestrate_agents requires a goal")
+        result = self.orchestrator.run(
+            goal=goal,
+            workflow=str(arguments.get("workflow") or "research"),
+            max_agents=int(arguments.get("max_agents") or 4),
+            allow_edits=bool(arguments.get("allow_edits", False)),
+        )
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=json.dumps(result, ensure_ascii=False, indent=2),
+            details={"orchestration": result},
+        )
+
+
 def register_subagent_tools(registry, workspace: Path, manager: SubAgentManager) -> None:
     """注册子 Agenttools。"""
     registry.register(SpawnSubAgentTool(workspace, manager), category="subagent")
     registry.register(RunSubAgentPlanTool(workspace, manager), category="subagent")
+    registry.register(OrchestrateAgentsTool(workspace, manager), category="subagent")

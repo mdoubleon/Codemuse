@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Iterator
 
 from codemuse.domain.messages import ChatMessage
 from codemuse.domain.tools import ToolCall, ToolSpec
-from codemuse.llm.models import LLMResponse
+from codemuse.llm.models import LLMResponse, LLMStreamChunk
 from codemuse.llm.provider.base import LLMProviderInfo
 from codemuse.memory.retrieval_hook import MEMORY_RECALL_METADATA_KEY
 
@@ -214,6 +215,16 @@ class FakeLLM:
         if memory_context:
             return LLMResponse(text=f"I found relevant memory for this request:\n\n{memory_context}")
         return LLMResponse(text="I can help inspect files, search text, and later analyze repositories into blueprints.")
+
+    def stream(self, messages: list[ChatMessage], tools: list[ToolSpec]) -> Iterator[LLMStreamChunk]:
+        """Emit deterministic deltas while preserving tool-call responses."""
+        response = self.complete(messages, tools)
+        if response.tool_calls:
+            yield LLMStreamChunk(tool_calls=response.tool_calls, usage=response.usage, provider_metadata=response.provider_metadata, done=True)
+            return
+        for index in range(0, len(response.text), 32):
+            end = min(len(response.text), index + 32)
+            yield LLMStreamChunk(text=response.text[index:end], provider_metadata=response.provider_metadata, done=end >= len(response.text))
 
     @staticmethod
     def _tool_call(name: str, arguments: dict) -> ToolCall:

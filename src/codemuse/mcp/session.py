@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+import shlex
+import subprocess
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from string import Formatter
 from typing import Protocol
@@ -85,6 +89,131 @@ class MockMCPClient:
         return json.dumps({"server": self.server.name, "tool": tool.name, "arguments": arguments}, ensure_ascii=False)
 
 
+class StdioMCPClient:
+    """Minimal MCP JSON-RPC client over a newline-delimited stdio process."""
+
+    def __init__(self, server: MCPServerConfig) -> None:
+        if not server.command:
+            raise ValueError(f"MCP stdio server has no command: {server.name}")
+        command = [*shlex.split(server.command), *server.args]
+        self.server = server
+        self._process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self._next_id = 0
+
+    def initialize(self) -> None:
+        self._request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "codemuse", "version": "1"}})
+        self._notify("notifications/initialized", {})
+
+    def list_tools(self) -> list[dict]:
+        result = self._request("tools/list", {})
+        return list((result.get("tools") if isinstance(result, dict) else []) or [])
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        result = self._request("tools/call", {"name": name, "arguments": arguments})
+        content = result.get("content") if isinstance(result, dict) else result
+        return {"content": _content_text(content), "payload": result, "is_error": bool(result.get("isError")) if isinstance(result, dict) else False}
+
+    def close(self) -> None:
+        if self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+
+    def _notify(self, method: str, params: dict) -> None:
+        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def _request(self, method: str, params: dict) -> dict:
+        self._next_id += 1
+        request_id = self._next_id
+        self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        if self._process.stdout is None:
+            raise RuntimeError("MCP stdio stdout is unavailable")
+        deadline = time.time() + max(1, self.server.timeout_seconds)
+        while time.time() < deadline:
+            line = self._process.stdout.readline()
+            if not line:
+                raise RuntimeError(f"MCP stdio process exited: {self.server.name}")
+            payload = json.loads(line.decode("utf-8"))
+            if payload.get("id") != request_id:
+                continue
+            if payload.get("error"):
+                raise RuntimeError(str(payload["error"]))
+            return dict(payload.get("result") or {})
+        raise TimeoutError(f"MCP request timed out: {self.server.name}/{method}")
+
+    def _write(self, payload: dict) -> None:
+        if self._process.stdin is None:
+            raise RuntimeError("MCP stdio stdin is unavailable")
+        self._process.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        self._process.stdin.flush()
+
+
+class HTTPMCPClient:
+    """Minimal MCP JSON-RPC client for HTTP/streamable HTTP endpoints."""
+
+    def __init__(self, server: MCPServerConfig) -> None:
+        if not server.url:
+            raise ValueError(f"MCP HTTP server has no url: {server.name}")
+        self.server = server
+        self._next_id = 0
+
+    def initialize(self) -> None:
+        self._request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "codemuse", "version": "1"}})
+        self._notify("notifications/initialized", {})
+
+    def list_tools(self) -> list[dict]:
+        result = self._request("tools/list", {})
+        return list((result.get("tools") if isinstance(result, dict) else []) or [])
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        result = self._request("tools/call", {"name": name, "arguments": arguments})
+        content = result.get("content") if isinstance(result, dict) else result
+        return {"content": _content_text(content), "payload": result, "is_error": bool(result.get("isError")) if isinstance(result, dict) else False}
+
+    def close(self) -> None:
+        return None
+
+    def _notify(self, method: str, params: dict) -> None:
+        payload = json.dumps({"jsonrpc": "2.0", "method": method, "params": params}, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(self.server.url or "", data=payload, method="POST", headers={"Content-Type": "application/json", "Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=max(1, self.server.timeout_seconds)):
+            return None
+
+    def _request(self, method: str, params: dict) -> dict:
+        self._next_id += 1
+        payload = json.dumps({"jsonrpc": "2.0", "id": self._next_id, "method": method, "params": params}, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(self.server.url or "", data=payload, method="POST", headers={"Content-Type": "application/json", "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=max(1, self.server.timeout_seconds)) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            exc.close()
+            raise RuntimeError(f"MCP HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"MCP HTTP request failed: {exc.reason}") from exc
+        result = json.loads(body)
+        if result.get("error"):
+            raise RuntimeError(str(result["error"]))
+        return dict(result.get("result") or {})
+
+
+def _content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+            elif item:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return json.dumps(content or {}, ensure_ascii=False)
+
+
 @dataclass
 class MCPSession:
     """绑定 MCP server 描述和客户端实例的会话对象。"""
@@ -120,9 +249,14 @@ class MCPSessionManager:
         if session is not None:
             session.touch(time.time())
             return session
-        if server.transport != "mock":
-            raise NotImplementedError(f"CodeMuse currently supports mock MCP transport only: {server.transport}")
-        client = MockMCPClient(server)
+        if server.transport == "mock":
+            client = MockMCPClient(server)
+        elif server.transport == "stdio":
+            client = StdioMCPClient(server)
+        elif server.transport in {"http", "streamable_http", "sse"}:
+            client = HTTPMCPClient(server)
+        else:
+            raise ValueError(f"Unsupported MCP transport: {server.transport}")
         client.initialize()
         session = MCPSession(server=server, client=client, last_used_at=time.time())
         self._sessions[server.name] = session

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -47,20 +48,28 @@ class WorkspaceSnapshotManager:
                 }
             )
 
+        git_metadata = self._git_metadata()
         manifest = {
             "checkpoint_id": checkpoint_id,
-            "kind": "workspace_snapshot",
+            "kind": "git_workspace_snapshot" if git_metadata.get("available") else "workspace_snapshot",
             "files_count": len(files),
             "total_bytes": total_bytes,
             "files": files,
         }
+        if git_metadata.get("available"):
+            manifest["git"] = git_metadata
         (snapshot_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return {
-            "kind": "workspace_snapshot",
+            "kind": manifest["kind"],
             "files_count": len(files),
             "total_bytes": total_bytes,
             "snapshot_path": str(snapshot_dir),
+            "git": git_metadata,
         }
+
+    def describe_workspace(self) -> dict[str, Any]:
+        """Return read-only Git identity and dirty-worktree metadata when available."""
+        return self._git_metadata()
 
     def restore_snapshot(self, checkpoint_id: str) -> dict[str, Any]:
         """把 workspace 恢复到指定 checkpoint 的快照状态。"""
@@ -116,6 +125,9 @@ class WorkspaceSnapshotManager:
             "will_restore_count": len(snapshot_paths),
             "will_remove_count": len(current_paths - snapshot_paths),
             "will_remove": sorted(current_paths - snapshot_paths)[:50],
+            "snapshot_kind": manifest.get("kind", "workspace_snapshot"),
+            "snapshot_git": manifest.get("git", {"available": False}),
+            "current_git": self._git_metadata(),
         }
 
     def _load_manifest(self, checkpoint_id: str) -> dict[str, Any]:
@@ -151,6 +163,53 @@ class WorkspaceSnapshotManager:
                 path.rmdir()
             except OSError:
                 continue
+
+    def _git_metadata(self) -> dict[str, Any]:
+        """Capture Git state without mutating the user's repository.
+
+        The file snapshot remains the source of truth for restore because it also
+        handles non-Git workspaces and untracked files. Git metadata makes the
+        checkpoint auditable and allows callers to show the original branch/HEAD.
+        """
+        if not self._git_available():
+            return {"available": False}
+        head = self._git_stdout(["rev-parse", "HEAD"])
+        branch = self._git_stdout(["symbolic-ref", "--short", "-q", "HEAD"]) or "HEAD"
+        status = self._git_stdout(["status", "--porcelain=v1", "--untracked-files=all"])
+        diff = self._git_stdout(["diff", "--binary", "HEAD", "--"])
+        untracked = self._git_stdout(["ls-files", "--others", "--exclude-standard"])
+        dirty_digest = hashlib.sha256(
+            (diff + "\0" + untracked).encode("utf-8", errors="replace")
+        ).hexdigest()
+        return {
+            "available": True,
+            "head": head,
+            "branch": branch,
+            "dirty": bool(status.strip()),
+            "dirty_context_digest": dirty_digest,
+            "changed_paths": [line[3:] for line in status.splitlines() if len(line) >= 4],
+            "untracked_paths": [line for line in untracked.splitlines() if line],
+        }
+
+    def _git_available(self) -> bool:
+        result = self._git(["rev-parse", "--is-inside-work-tree"], check=False)
+        return result.returncode == 0 and (result.stdout or "").strip().lower() == "true"
+
+    def _git_stdout(self, args: list[str]) -> str:
+        result = self._git(args, check=False)
+        return (result.stdout or "").strip()
+
+    def _git(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(self.workspace),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if check and result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "git command failed").strip())
+        return result
 
     def _assert_inside_workspace(self, path: Path) -> None:
         """确保后续删除或写入不会越过 workspace。"""

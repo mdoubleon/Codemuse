@@ -14,3 +14,13 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     provider_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class LLMStreamChunk:
+    """Normalized chunk emitted by an optional streaming provider."""
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict[str, int] = field(default_factory=dict)
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
+    done: bool = False

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from pathlib import Path
 
@@ -73,16 +74,24 @@ class SubAgentManager:
             started_at=started_at,
         )
 
-    def run_plan(self, *, tasks: list[str], spec_name: str = "repo-researcher", max_turns: int | None = None) -> dict[str, object]:
-        """Run a bounded sequence of subagent tasks and return an aggregate trace."""
+    def run_plan(self, *, tasks: list[str], spec_name: str = "repo-researcher", max_turns: int | None = None, parallel: bool = True, max_workers: int = 4) -> dict[str, object]:
+        """Run bounded subagent tasks, optionally in parallel, and aggregate traces."""
         clean_tasks = [task.strip() for task in tasks if task.strip()]
         if not clean_tasks:
             raise ValueError("subagent plan requires at least one task")
-        results = [self.run_sync(spec_name=spec_name, task=task, max_turns=max_turns) for task in clean_tasks]
+        if parallel and len(clean_tasks) > 1:
+            workers = max(1, min(int(max_workers), 4, len(clean_tasks)))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="codemuse-subagent") as executor:
+                futures = [executor.submit(self.run_sync, spec_name=spec_name, task=task, max_turns=max_turns) for task in clean_tasks]
+                results = [future.result() for future in futures]
+        else:
+            results = [self.run_sync(spec_name=spec_name, task=task, max_turns=max_turns) for task in clean_tasks]
         return {
             "status": "completed",
             "spec_name": spec_name,
             "task_count": len(results),
+            "parallel": bool(parallel and len(clean_tasks) > 1),
+            "max_workers": min(int(max_workers), 4),
             "summaries": [result.summary for result in results],
             "used_tools": sorted({tool for result in results for tool in result.used_tools}),
             "results": [result.to_dict() for result in results],

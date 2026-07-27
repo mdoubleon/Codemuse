@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -10,10 +12,12 @@ from typing import Any
 from codemuse.domain.checkpoints import CheckpointRecord
 from codemuse.domain.messages import ChatMessage, TextPart
 from codemuse.domain.tools import ToolCall
-from codemuse.llm.provider.base import LLMProvider
+from codemuse.llm.provider.base import LLMProvider, iter_provider_stream
+from codemuse.llm.models import LLMResponse
 from codemuse.memory.retrieval_hook import MemoryContextProvider
 from codemuse.runtime.events import AgentEvent
 from codemuse.runtime.compaction import ConversationCompactor
+from codemuse.runtime.cancellation import CancellationToken
 from codemuse.runtime.emitter import LifecycleEmitter
 from codemuse.runtime.hooks import RuntimeHooks
 from codemuse.runtime.turn_loop import TurnController
@@ -52,6 +56,7 @@ class AgentRuntime:
         emitter: LifecycleEmitter | None = None,
         turn_controller: TurnController | None = None,
         compactor: ConversationCompactor | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> None:
         """注入模型、工具注册表、存储和可选记忆/审批/检查点组件，恢复会话状态。"""
         self.workspace = workspace.resolve()
@@ -74,6 +79,8 @@ class AgentRuntime:
         self.state = AgentState(session_id=session.session_id, system_prompt=session.system_prompt, messages=session.messages, queued_messages=list(session.queued_messages))
         self._subscribers: list[Subscriber] = []
         self._cancel_event = threading.Event()
+        self.cancellation_token = cancellation_token or CancellationToken()
+        self._active_turn_node_id: str | None = None
         self._restore_pending_tool_calls()
 
     @property
@@ -88,10 +95,11 @@ class AgentRuntime:
     def request_cancel(self) -> None:
         """请求中断当前主循环。下一个 turn 边界会退出，不会强杀正在执行的工具。"""
         self._cancel_event.set()
+        self.cancellation_token.cancel()
 
     def is_cancel_requested(self) -> bool:
         """返回当前是否有取消请求挂起。"""
-        return self._cancel_event.is_set()
+        return self._cancel_event.is_set() or self.cancellation_token.is_cancelled
 
     def enqueue_message(self, text: str, *, delivery: str = "follow_up") -> None:
         """Queue steering/follow-up input for the next available turn."""
@@ -199,9 +207,14 @@ class AgentRuntime:
 
         self._emit("approval_approved", captured, tool_name=approval.tool_name, message=f"Approved: {approval_id}")
         # 用户批准后，直接执行原始工具调用；这里不再重复进入审批门。
+        self.state.phase = "executing"
+        self._emit("tool_call", captured, tool_name=approval.tool_name, details={"arguments": approval.arguments, "approval_id": approval_id})
         self._checkpoint_before_tool(call, captured)
         result = self.tool_registry.execute(approval.tool_name, approval.arguments)
         result.tool_call_id = approval.tool_call_id
+        result_decision = self.emitter.emit_tool_result(captured[-1], self.state, call, result)
+        if result_decision.result is not None:
+            result = result_decision.result
         self.state.messages.append(result.as_chat_message())
         self.state.pending_tool_calls = [call for call in self.state.pending_tool_calls if call.id != approval.tool_call_id]
         self.approval_store.mark(approval_id, "approved")
@@ -240,6 +253,7 @@ class AgentRuntime:
         """执行 ReAct 主循环：调用模型、处理工具调用、审批暂停和最终收尾。"""
         captured: list[AgentEvent] = []
         self._cancel_event.clear()
+        self.cancellation_token.reset()
         self.state.is_running = True
         self._emit("agent_start", captured, message="Agent started.")
         keep_running = True
@@ -247,7 +261,7 @@ class AgentRuntime:
         cancelled = False
         try:
             while keep_running and turns < self.max_turns:
-                if self._cancel_event.is_set():
+                if self.is_cancel_requested():
                     cancelled = True
                     break
                 if self.state.queued_messages:
@@ -256,7 +270,9 @@ class AgentRuntime:
                     self._emit("queue_dequeued", captured, message=queued.text, details={"delivery": queued.delivery, "queue_size": len(self.state.queued_messages)})
                 turns += 1
                 self.state.turn_id += 1
-                self.state.phase = "planning"
+                self._begin_turn_node()
+                turn_start = self.turn_controller.on_turn_start(self.state)
+                self.state.phase = turn_start.phase or "planning"
                 self._emit("turn_start", captured, details={"turn_id": self.state.turn_id})
                 model_messages = self._messages_for_model()
                 request_event = AgentEvent(type="before_provider_request", session_id=self.session_id, turn_id=self.state.turn_id, phase=self.state.phase)
@@ -264,7 +280,26 @@ class AgentRuntime:
                 request_messages = request.messages if request.messages is not None else model_messages
                 request_tools = request.tools if request.tools is not None else self.tool_registry.specs()
                 self._emit("before_provider_request", captured, details={"message_count": len(request_messages), "tool_count": len(request_tools)})
-                response = self.llm.complete(request_messages, request_tools)
+                text_parts: list[str] = []
+                streamed_tool_calls: list[ToolCall] = []
+                streamed_usage: dict[str, int] = {}
+                streamed_metadata: dict[str, Any] = {}
+                for chunk in iter_provider_stream(self.llm, request_messages, request_tools):
+                    if chunk.text:
+                        text_parts.append(chunk.text)
+                        self._emit("message_delta", captured, delta=chunk.text)
+                    if chunk.tool_calls:
+                        streamed_tool_calls.extend(chunk.tool_calls)
+                    if chunk.usage:
+                        streamed_usage.update(chunk.usage)
+                    if chunk.provider_metadata:
+                        streamed_metadata.update(chunk.provider_metadata)
+                response = LLMResponse(
+                    text="".join(text_parts),
+                    tool_calls=streamed_tool_calls,
+                    usage=streamed_usage,
+                    provider_metadata=streamed_metadata,
+                )
                 response_event = AgentEvent(type="provider_response", session_id=self.session_id, turn_id=self.state.turn_id, phase=self.state.phase)
                 response_decision = self.emitter.emit_provider_response(response_event, response.text, response.tool_calls)
                 if response_decision.assistant_text is not None:
@@ -279,22 +314,26 @@ class AgentRuntime:
                     self.state.messages.append(assistant_message)
                     self.state.phase = "executing"
                     stopped_for_approval = False
+                    tool_failed = False
                     for call in response.tool_calls:
-                        if self._cancel_event.is_set():
+                        if self.is_cancel_requested():
                             cancelled = True
                             break
                         self._emit("tool_call", captured, tool_name=call.name, details={"arguments": call.arguments})
                         hook_decision = self.emitter.emit_tool_call(captured[-1], self.state, call, self.tool_registry)
                         if hook_decision.action == "deny":
+                            tool_failed = True
                             self._append_tool_error(call, hook_decision.message or "Tool call blocked by runtime hook.")
                             self._emit("tool_error", captured, tool_name=call.name, message=hook_decision.message or "Tool call blocked by runtime hook.", is_error=True)
                             continue
                         decision = self._policy_decision(call)
                         if decision.action == DENY:
+                            tool_failed = True
                             self._append_tool_error(call, decision.reason)
                             self._emit("tool_error", captured, tool_name=call.name, message=decision.reason, details=decision.details, is_error=True)
                             continue
                         if decision.action == ASK:
+                            self.state.phase = self.turn_controller.before_plan_approval().phase
                             approval = self._stage_approval(call, decision.reason)
                             self.state.pending_tool_calls.append(call)
                             self.state.phase = "awaiting_approval"
@@ -323,6 +362,7 @@ class AgentRuntime:
                             self.state.messages.append(result.as_chat_message())
                             self._emit("tool_result", captured, tool_name=call.name, message=result.content[:500], details=result.details)
                         except Exception as exc:  # noqa: BLE001 - phase 1 records tool failures as observations
+                            tool_failed = True
                             error_text = str(exc)
                             error_decision = self.emitter.emit_tool_error(captured[-1], self.state, call, exc)
                             self._append_tool_error(call, error_text)
@@ -333,11 +373,21 @@ class AgentRuntime:
                         keep_running = False
                         self._emit("turn_end", captured, details={"turn_id": self.state.turn_id, "phase": "awaiting_approval"})
                         continue
-                    keep_running = True
+                    next_message = self.state.queued_messages[0] if self.state.queued_messages else None
+                    round_decision = self.turn_controller.after_tool_round(
+                        tool_failed=tool_failed,
+                        continue_after_error=True,
+                        steering_message=next_message,
+                    )
+                    keep_running = round_decision.action != "stop"
                     continue
-                keep_running = bool(self.state.queued_messages)
+                assistant_decision = self.turn_controller.after_assistant_turn(
+                    self.state.queued_messages[0] if self.state.queued_messages else None
+                )
+                keep_running = assistant_decision.action != "stop"
                 self._emit("turn_end", captured, details={"turn_id": self.state.turn_id})
         finally:
+            self._finish_turn_node("cancelled" if cancelled else ("awaiting_approval" if self.state.phase == "awaiting_approval" else "completed"))
             if cancelled:
                 self.state.phase = "cancelled"
                 self._emit(
@@ -352,6 +402,7 @@ class AgentRuntime:
                 self.state.phase = "idle"
             self.state.is_running = False
             self._cancel_event.clear()
+            self.cancellation_token.reset()
             self._persist()
             self._emit("agent_end", captured, message="Agent ended.")
         return captured
@@ -670,6 +721,7 @@ class AgentRuntime:
         """保存会话检查点，并附加当前工作区文件快照。"""
         if self.checkpoint_store is None:
             raise RuntimeError("Checkpoint store is not configured.")
+        metadata = {**metadata, "head_id": self.session.active_head_id, "turn_id": self.state.turn_id}
         record = self.checkpoint_store.create(
             session_id=self.session_id,
             label=label,
@@ -720,7 +772,36 @@ class AgentRuntime:
         self.session.system_prompt = self.state.system_prompt
         self.session.messages = self.state.messages
         self.session.queued_messages = list(self.state.queued_messages)
+        self.session.active_head_id = self.session.active_head_id
+        self.session.turns = list(self.session.turns)
         self.session_store.save(self.session)
+
+    def _begin_turn_node(self) -> None:
+        """Append a lightweight turn-DAG node without changing message storage."""
+        if self.session.turns and self.session.turns[-1].get("status") == "running":
+            self.session.turns[-1]["status"] = "completed"
+        node_id = str(uuid.uuid4())
+        self._active_turn_node_id = node_id
+        self.session.turns.append({
+            "turn_id": self.state.turn_id,
+            "turn_node_id": node_id,
+            "parent_head_id": self.session.active_head_id,
+            "status": "running",
+            "started_at": time.time(),
+            "message_count": len(self.state.messages),
+        })
+        self.session.active_head_id = node_id
+
+    def _finish_turn_node(self, status: str) -> None:
+        if not self._active_turn_node_id:
+            return
+        for node in reversed(self.session.turns):
+            if node.get("turn_node_id") == self._active_turn_node_id:
+                node["status"] = status
+                node["finished_at"] = time.time()
+                node["message_count"] = len(self.state.messages)
+                break
+        self._active_turn_node_id = None
 
     def _emit(
         self,
@@ -728,6 +809,7 @@ class AgentRuntime:
         captured: list[AgentEvent],
         *,
         message: str | None = None,
+        delta: str | None = None,
         tool_name: str | None = None,
         details: dict[str, Any] | None = None,
         is_error: bool = False,
@@ -739,6 +821,7 @@ class AgentRuntime:
             turn_id=self.state.turn_id,
             phase=self.state.phase,
             message=message,
+            delta=delta,
             tool_name=tool_name,
             details=details or {},
             is_error=is_error,
