@@ -6,6 +6,7 @@ import ipaddress
 import re
 import socket
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
@@ -37,6 +38,8 @@ class WebFetchResponse:
     redirects: list[str] = field(default_factory=list)
     truncated: bool = False
     executed_javascript: bool = False
+    title: str = ""
+    links: list[dict[str, str]] = field(default_factory=list)
 
 
 class GuardedFetchError(RuntimeError):
@@ -86,7 +89,11 @@ class GuardedFetcher:
                 raw = raw[: self.config.max_bytes]
             charset = _charset_from_content_type(content_type)
             decoded = raw.decode(charset, errors="replace")
-            readable = readable_text(decoded) if _looks_like_html(content_type, decoded) else decoded
+            is_html = _looks_like_html(content_type, decoded)
+            page_parser = _PageMetadataParser(current_url)
+            if is_html:
+                page_parser.feed(decoded)
+            readable = readable_text(decoded) if is_html else decoded
             truncated_chars = len(readable) > self.config.max_chars
             if truncated_chars:
                 readable = readable[: self.config.max_chars]
@@ -98,6 +105,8 @@ class GuardedFetcher:
                 redirects=redirects,
                 truncated=truncated_bytes or truncated_chars,
                 executed_javascript=False,
+                title=page_parser.title,
+                links=page_parser.links,
             )
         raise GuardedFetchError(f"Too many redirects while fetching {url!r}; max_redirects={self.config.max_redirects}")
 
@@ -216,3 +225,36 @@ class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
         """处理 redirectrequest。"""
         return None
+
+
+class _PageMetadataParser(HTMLParser):
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.title = ""
+        self.links: list[dict[str, str]] = []
+        self._in_title = False
+        self._active_link: dict[str, str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): value or "" for key, value in attrs}
+        if tag.lower() == "title":
+            self._in_title = True
+        if tag.lower() == "a" and values.get("href") and len(self.links) < 100:
+            target = urljoin(self.base_url, values["href"])
+            if urlparse(target).scheme in {"http", "https"}:
+                self._active_link = {"url": target, "text": values.get("aria-label") or values.get("title") or ""}
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self._in_title = False
+        if tag.lower() == "a" and self._active_link is not None:
+            self._active_link["text"] = " ".join(self._active_link["text"].split())[:200]
+            self.links.append(self._active_link)
+            self._active_link = None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.title = (self.title + " " + data).strip()[:300]
+        if self._active_link is not None:
+            self._active_link["text"] += " " + data

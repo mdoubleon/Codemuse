@@ -22,3 +22,35 @@ class MCPToolDescriptor:
     is_destructive: bool = False
     approval_mode: str = "default"
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.__dict__)
+
+
+@dataclass
+class MCPResourceDescriptor:
+    server_name: str
+    uri: str
+    name: str = ""
+    description: str = ""
+    mime_type: str = ""
+    is_remote: bool = False
+    requires_auth: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.__dict__)
+
+
+@dataclass
+class MCPPromptDescriptor:
+    server_name: str
+    name: str
+    description: str = ""
+    arguments_schema: dict[str, Any] = field(default_factory=dict)
+    is_remote: bool = False
+    requires_auth: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.__dict__)

@@ -67,6 +67,9 @@ class FakeLLM:
                     )
                 ]
             )
+        if self._asks_to_search_web(lowered):
+            mode = "github" if "github" in lowered else ("news" if "news" in lowered or "latest" in lowered else "web")
+            return LLMResponse(tool_calls=[self._tool_call("web_search", {"query": self._extract_web_search_query(text), "mode": mode, "limit": 5})])
         if self._asks_to_import_repository(lowered):
             return LLMResponse(
                 tool_calls=[
@@ -372,6 +375,16 @@ class FakeLLM:
     def _asks_to_fetch_web(lowered: str) -> bool:
         """判断用户是否希望 Agent 静态获取网页内容。"""
         return any(item in lowered for item in ["web fetch", "fetch url", "fetch web", "抓取网页", "获取网页"])
+
+    @staticmethod
+    def _asks_to_search_web(lowered: str) -> bool:
+        return any(item in lowered for item in ["web search", "search web", "search the web", "web news", "github trending"])
+
+    @staticmethod
+    def _extract_web_search_query(text: str) -> str:
+        cleaned = re.sub(r"(?i)\b(web search|search (?:the )?web|web news|github trending)\b", "", text)
+        cleaned = re.sub(r"(?i)\b(query|for)\s*:\s*", "", cleaned)
+        return cleaned.strip(" :") or text
 
     @staticmethod
     def _asks_for_mcp_tool(lowered: str) -> bool:

@@ -33,8 +33,7 @@ codemuse/
 ├── evals/                评测入口和报告输出目录
 ├── artifacts/            demo/benchmark 产物目录
 ├── skills/               项目级技能扩展目录
-├── releases/             发布说明预留目录
-└── web/                  Web 相关说明，实际静态资源在 src/codemuse/web/static
+└── releases/             发布说明目录
 ```
 
 运行时数据写入 `.data/codemuse/`，本地配置可放在 `.codemuse/config.json`，真实 API Key 放在 `.env` 或进程环境变量中。这些目录和文件默认不提交。
@@ -92,6 +91,8 @@ python scripts/run_server.py --host 127.0.0.1 --port 8765
 ```powershell
 python scripts/run_agent.py "list files"
 python scripts/run_agent.py memory search "ToolRegistry"
+python scripts/run_agent.py models providers
+python scripts/run_agent.py models use deepseek
 python scripts/run_agent.py doctor --run-compile --web-smoke
 ```
 
@@ -117,13 +118,31 @@ python -m unittest discover -s tests
 }
 ```
 
-`.env` 或进程环境变量保存真实密钥：
+`.env` 或进程环境变量保存真实密钥。`scripts/run_agent.py` 和 `scripts/run_server.py` 都会加载 `.env`，但不会覆盖已存在的进程环境变量：
 
 ```env
+# 自定义 OpenAI-compatible 中转站
 CODEMUSE_API_KEY=your_api_key_here
+CODEMUSE_BASE_URL=https://your-relay.example/v1
+CODEMUSE_MODEL=your-model
+CODEMUSE_PROVIDER=openai_compatible
+
+# 或 DeepSeek 专用适配器
+# DEEPSEEK_API_KEY=your_deepseek_api_key_here
+# CODEMUSE_PROVIDER=deepseek
 ```
 
-前端只允许填写环境变量名，不应该填写真实 API Key。
+也可通过 CLI 一次性选择并保存 Provider：
+
+```powershell
+python scripts/run_agent.py models use openai_compatible `
+  --model your-model `
+  --base-url https://your-relay.example/v1 `
+  --api-key-env CODEMUSE_API_KEY
+python scripts/run_agent.py models use deepseek
+```
+
+前端和项目配置中的 `api_key_env` 只允许填写环境变量名，不应该填写真实 API Key。
 
 ## 安全边界
 
@@ -152,4 +171,3 @@ python -m unittest discover -s tests
 - `.env`、`.codemuse/`、`.data/`、`.private_notes/` 不进入提交。
 - 生成报告只提交有意公开的示例。
 - 文档不包含本机绝对路径、真实 API Key、私有中转站地址或个人学习记录。
-

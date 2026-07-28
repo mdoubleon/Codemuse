@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from codemuse.mcp.config import MCPServerConfig, load_mcp_config
-from codemuse.mcp.descriptors import MCPToolDescriptor
+from codemuse.mcp.descriptors import MCPPromptDescriptor, MCPResourceDescriptor, MCPToolDescriptor
 from codemuse.mcp.results import MCPResult
 from codemuse.mcp.session import MCPSessionManager
 
@@ -65,9 +65,35 @@ class MCPManager:
             try:
                 tools.extend(self.list_mcp_tools(server_name))
             except Exception:
-                # Stage 8 只支持 mock transport；真实 stdio/http 后续再接入。
+                # 单个外部 server 不可用时不阻断其他能力发现。
                 continue
         return tools
+
+    def discover_resources(self) -> list[MCPResourceDescriptor]:
+        descriptors: list[MCPResourceDescriptor] = []
+        for server_name in self.server_names():
+            server = self.server_config(server_name)
+            for item in self._sessions.get_or_create(server).list_resources():
+                descriptors.append(MCPResourceDescriptor(server.name, str(item["uri"]), str(item.get("name") or item["uri"]), str(item.get("description") or ""), str(item.get("mime_type") or item.get("mimeType") or ""), server.is_remote, server.requires_auth, {"transport": server.transport}))
+        return descriptors
+
+    def discover_prompts(self) -> list[MCPPromptDescriptor]:
+        descriptors: list[MCPPromptDescriptor] = []
+        for server_name in self.server_names():
+            server = self.server_config(server_name)
+            for item in self._sessions.get_or_create(server).list_prompts():
+                descriptors.append(MCPPromptDescriptor(server.name, str(item["name"]), str(item.get("description") or ""), dict(item.get("arguments_schema") or item.get("argumentsSchema") or {}), server.is_remote, server.requires_auth, {"transport": server.transport}))
+        return descriptors
+
+    def read_resource(self, server_name: str, uri: str) -> MCPResult:
+        server = self.server_config(server_name)
+        payload = self._sessions.get_or_create(server).client.read_resource(uri)
+        return MCPResult(server_name, "mcp_resource", uri, str(payload.get("content") or ""), dict(payload.get("payload") or {}), bool(payload.get("is_error")), {"transport": server.transport})
+
+    def get_prompt(self, server_name: str, name: str, arguments: dict[str, Any] | None = None) -> MCPResult:
+        server = self.server_config(server_name)
+        payload = self._sessions.get_or_create(server).client.get_prompt(name, arguments or {})
+        return MCPResult(server_name, "mcp_prompt", name, str(payload.get("content") or ""), dict(payload.get("payload") or {}), bool(payload.get("is_error")), {"transport": server.transport})
 
     def status_report(self) -> dict[str, Any]:
         """Return server lifecycle, discovery, auth, and transport status for diagnostics."""

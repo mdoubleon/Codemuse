@@ -22,6 +22,7 @@ python scripts/run_agent.py "list files"
 新命令模式：
 python scripts/run_agent.py capabilities list
 python scripts/run_agent.py models providers
+python scripts/run_agent.py models use deepseek
 -> _main_command(...)
 -> _handle_xxx(...)
 -> sdk.xxx(...)
@@ -47,7 +48,7 @@ SDK 是外部调用 CodeMuse 的稳定门面。
 3. 把 Runtime 返回的 AgentEvent 和状态包装成 dict
 ```
 
-所以 CLI、测试、未来 Web 客户端都应该调用 SDK，而不是自己拼 Runtime。
+所以 CLI、RPC、TUI、测试和其他机器客户端都应该调用 SDK，而不是自己拼 Runtime。HTTP 服务通过 `WebSessionManager` 复用同一套 bootstrap/runtime 边界。
 
 ## 3. Bootstrap 系统装配
 
@@ -118,9 +119,12 @@ Runtime 只负责调度，不负责具体工具怎么干，也不负责具体模
 
 ```text
 fake                已实现，用于本地学习和测试
-openai_compatible   已实现，缺少 API key 时仅报告 readiness
+openai_compatible   已实现，用于官方 OpenAI endpoint 或自定义兼容中转站
 bailian             已实现，缺少 API key 时仅报告 readiness
+deepseek            已实现，使用 DEEPSEEK_API_KEY 和 DeepSeek 专用默认值
 ```
+
+Provider 的选择由 `models use <provider>`、Web 工作台或 `.codemuse/config.json` 完成。配置中只保存 `api_key_env` 的环境变量名；`scripts/run_agent.py` 和 `scripts/run_server.py` 都从 `.env` 或进程环境变量读取真实密钥。
 
 `FakeLLM` 会根据用户输入用规则模拟模型行为，例如看到 `list files` 就生成 `ToolCall(name="list_files")`。
 
@@ -287,7 +291,7 @@ ToolCall(spawn_subagent)
 子 Agent：只能拿 allowlist 中的工具，避免越权和递归失控
 ```
 
-模型创建也必须走同一个 `llm_factory`，这样未来可以统一配置模型。
+模型创建也必须走同一个 `llm_factory`，确保父、子 Agent 使用统一的模型配置。
 
 ## 10. Server 路径
 
@@ -300,7 +304,7 @@ scripts/run_server.py
 -> AgentRuntime
 ```
 
-服务端现在是 MVP：
+服务端使用标准库 HTTP 实现，提供：
 
 ```text
 HTTP JSON API
@@ -309,9 +313,7 @@ SessionHandle 队列
 审批/checkpoint/rewind 接口
 ```
 
-后续可以升级成 FastAPI + SSE/WebSocket + 更完整前端 UI。
-
-Stage 30 补了最小浏览器工作台：
+浏览器工作台调用链：
 
 ```text
 GET /
@@ -321,7 +323,7 @@ GET /
 -> SessionHandle records AgentEvent payloads for polling
 ```
 
-Stage 29 补了 repo import / project plan 路径：
+Repo import / project plan 调用链：
 
 ```text
 prepare_repo_import
@@ -336,7 +338,7 @@ build_project_plan
 
 ## 11. Skill / Extension 发现路径
 
-Stage 27 以后，能力目录不再只来自工具注册表。
+能力目录不只来自工具注册表。
 `create_capability_catalog(...)` 会组合多个 discovery provider：
 
 ```text
@@ -345,7 +347,7 @@ SkillCapabilityDiscoveryProvider     SKILL.md 描述文件
 ExtensionCapabilityDiscoveryProvider EXTENSION.json/extension.json manifest
 ```
 
-当前 skill/extension 只是元数据能力：
+Skill/Extension 的发现与运行能力：
 
 ```text
 skills/loader.py
@@ -356,15 +358,49 @@ skills/loader.py
 extensions/loader.py
 -> 读取 .codemuse/extensions 和 extensions 下的 EXTENSION.json
 -> 解析 name / description / entrypoint / provides / version
--> 输出 CapabilityDescriptor(kind="extension", metadata.execution="not_loaded")
+-> 输出 CapabilityDescriptor(kind="extension")
+-> app/extensions_runtime.py 注册声明式工具、context hook 和 lifecycle hook
 ```
 
-这里故意不执行 extension entrypoint，也不把 skill body 注入模型上下文。
-执行扩展和技能注入属于后续 RuntimeHooks / extension registry 阶段。
+Extension 不执行任意 Python entrypoint；Skill 在显式启用或自动匹配后按需把 body 注入当前轮上下文。
+两者都通过 Runtime hooks 接入，Extension 只执行 manifest 中可审计的声明式行为。
 
-## 12. Benchmark / Eval 路径
+## 12. Prompt、RPC、Learning、Browser 和 TUI
 
-Stage 28 以后，CodeMuse 有一个确定性 baseline runner：
+```text
+prompts/loader.py
+-> .codemuse/prompts > prompts > builtin 分层覆盖
+
+api/rpc_protocol.py + api/rpc_mode.py
+-> 版本校验 -> SDK dispatch -> event/result/error JSON lines
+
+Runtime agent_end（会话已持久化）
+-> learning/runtime.py
+-> 安全过滤和启发式提取
+-> .data/codemuse/learning/candidates.jsonl
+-> approve 后提升到 project_memory
+
+browser_navigate（审批 + SSRF preview）
+-> GuardedFetcher
+-> BrowserSession tab/history/snapshot/link refs
+-> browser_state 读取缓存状态
+
+web_search mode=web|news|github（网络审批）
+-> 固定公共 endpoint + 编码 query
+-> SearchProvider
+-> 静态结果，不执行 JavaScript
+
+cli tui
+-> TuiController
+-> SessionClient
+-> SDK
+```
+
+Browser 返回 `executed_javascript=false`，不是 CDP/DOM 自动化。Learning 默认只生成待审核候选。
+
+## 13. Benchmark / Eval 路径
+
+CodeMuse 提供确定性 baseline runner：
 
 ```text
 python scripts/run_eval.py
@@ -396,7 +432,7 @@ FakeLLM
 -> report
 ```
 
-## 13. 推荐阅读顺序
+## 14. 推荐阅读顺序
 
 第一次完整看代码，建议按这个顺序：
 

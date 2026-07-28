@@ -79,7 +79,7 @@ class SubAgentRunResult:
 
 
 def default_subagent_specs() -> dict[str, SubAgentSpec]:
-    """CodeMuse Stage 10 先提供只读研究型子 Agent。"""
+    """提供研究、规划、审查和隔离代码修改所需的内置子 Agent 规格。"""
 
     repo_researcher = SubAgentSpec(
         name="repo-researcher",
@@ -111,7 +111,7 @@ def default_subagent_specs() -> dict[str, SubAgentSpec]:
             name="code-worker",
             description="Scoped worker; edits require an isolated worktree and parent approval.",
             system_prompt="You are code-worker. Prepare a scoped change in an isolated worktree; never edit the parent workspace directly.",
-            tool_allowlist=["list_files", "read_file", "search_text"],
+            tool_allowlist=["list_files", "read_file", "search_text", "write_file", "replace_text", "apply_patch"],
             max_turns=5,
         ),
     }

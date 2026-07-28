@@ -28,6 +28,8 @@ COMMANDS = {
     "benchmark",
     "doctor",
     "demo",
+    "rpc",
+    "tui",
 }
 
 
@@ -84,6 +86,8 @@ def _main_command(argv: list[str], *, default_workspace: Path | None) -> int:
     _add_benchmark_parser(subparsers, default_workspace)
     _add_doctor_parser(subparsers, default_workspace)
     _add_demo_parser(subparsers, default_workspace)
+    _add_rpc_parser(subparsers, default_workspace)
+    _add_tui_parser(subparsers, default_workspace)
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -124,6 +128,13 @@ def _main_command(argv: list[str], *, default_workspace: Path | None) -> int:
         return _handle_doctor(args)
     if args.command == "demo":
         return _handle_demo(args)
+    if args.command == "rpc":
+        from codemuse.api.rpc_mode import run_stdio_rpc
+        run_stdio_rpc(Path(args.workspace).resolve())
+        return 0
+    if args.command == "tui":
+        from codemuse.tui import tui_main
+        return tui_main(Path(args.workspace).resolve(), session_id=args.session)
     parser.error(f"Unknown command: {args.command}")
     return 2
 
@@ -227,6 +238,25 @@ def _handle_timeline(args: argparse.Namespace) -> None:
 def _handle_models(args: argparse.Namespace) -> None:
     """处理 CLI 子命令并调用对应 SDK 能力。"""
     workspace = Path(getattr(args, "workspace", _default_workspace(None))).resolve()
+    if args.models_command == "use":
+        snapshot = sdk.configure_model_provider(
+            workspace,
+            args.provider,
+            model=args.model,
+            base_url=args.base_url,
+            api_key_env=args.api_key_env,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+        )
+        if args.json:
+            print_json(snapshot)
+            return
+        model = snapshot["config"]["model"]
+        print(
+            f"Selected provider={model['provider']} model={model['model']} "
+            f"base_url={model['base_url'] or '-'} api_key_env={model['api_key_env'] or '-'}"
+        )
+        return
     providers = sdk.list_provider_readiness(workspace)
     if args.json:
         print_json(providers)
@@ -465,6 +495,15 @@ def _add_models_parser(subparsers: argparse._SubParsersAction, default_workspace
     providers_parser = nested.add_parser("providers")
     providers_parser.add_argument("--json", action="store_true")
     _add_workspace(providers_parser, default_workspace)
+    use_parser = nested.add_parser("use", help="Select a provider and persist its model settings.")
+    use_parser.add_argument("provider", help="Provider name from 'models providers'.")
+    use_parser.add_argument("--model", default=None, help="Model identifier override.")
+    use_parser.add_argument("--base-url", default=None, help="OpenAI-compatible endpoint base URL override.")
+    use_parser.add_argument("--api-key-env", default=None, help="Environment variable name that holds the API key.")
+    use_parser.add_argument("--temperature", type=float, default=None, help="Optional provider generation temperature.")
+    use_parser.add_argument("--max-tokens", type=int, default=None, help="Optional maximum generated tokens.")
+    use_parser.add_argument("--json", action="store_true")
+    _add_workspace(use_parser, default_workspace)
 
 
 def _add_memory_parser(subparsers: argparse._SubParsersAction, default_workspace: Path | None) -> None:
@@ -526,6 +565,17 @@ def _add_demo_parser(subparsers: argparse._SubParsersAction, default_workspace: 
     run_parser.add_argument("--output", default=str(_default_workspace(default_workspace) / "artifacts" / "demo"))
     run_parser.add_argument("--json", action="store_true")
     run_parser.add_argument("--no-report", action="store_true")
+
+
+def _add_rpc_parser(subparsers: argparse._SubParsersAction, default_workspace: Path | None) -> None:
+    parser = subparsers.add_parser("rpc", help="Serve versioned JSON-lines RPC over stdio.")
+    _add_workspace(parser, default_workspace)
+
+
+def _add_tui_parser(subparsers: argparse._SubParsersAction, default_workspace: Path | None) -> None:
+    parser = subparsers.add_parser("tui", help="Start the dependency-free interactive shell.")
+    _add_workspace(parser, default_workspace)
+    parser.add_argument("--session", default=None)
 
 
 def _first_command_token(argv: list[str]) -> str | None:

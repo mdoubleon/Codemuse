@@ -2,6 +2,7 @@ const state = {
   sessionId: "",
   cursor: 0,
   events: [],
+  eventIds: new Set(),
   localEvents: [],
   sessions: [],
   sessionTree: [],
@@ -37,6 +38,30 @@ const workFrames = ["/assets/cat-work-1.webp", "/assets/cat-work-2.webp", "/asse
 const POLL_FAST = 1000;
 const POLL_SLOW = 2500;
 
+const PROVIDER_DEFAULTS = {
+  fake: {
+    default_model: "fake-local",
+    default_base_url: "",
+    default_api_key_env: ""
+  },
+  openai_compatible: {
+    default_model: "gpt-4o-mini",
+    default_base_url: "https://api.openai.com/v1",
+    default_api_key_env: "OPENAI_API_KEY"
+  },
+  bailian: {
+    default_model: "qwen-plus",
+    default_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    default_api_key_env: "DASHSCOPE_API_KEY"
+  },
+  deepseek: {
+    default_model: "deepseek-chat",
+    default_base_url: "https://api.deepseek.com/v1",
+    default_api_key_env: "DEEPSEEK_API_KEY",
+    default_temperature: 0.2
+  }
+};
+
 const SUGGESTS = [
   { label: "查看仓库结构", prompt: "list files", hint: "list_files" },
   { label: "读 README", prompt: "read README.md", hint: "read_file" },
@@ -56,6 +81,7 @@ const NAV_TO_TAB = {
 const nodes = {};
 let pollTimer = 0;
 let pollInterval = POLL_FAST;
+let activePoll = null;
 
 boot().catch(showError);
 
@@ -86,7 +112,7 @@ function cacheNodes() {
     "workspace-form", "workspace-path", "workspace-apply", "file-refresh", "file-tree", "file-preview",
     "repo-refresh", "repo-status", "repo-cache", "report-refresh", "report-summary",
     "api-form", "api-refresh", "api-status", "api-provider", "api-model",
-    "api-base-url", "api-key-env", "provider-list", "capabilities",
+    "api-base-url", "api-key-env", "api-temperature", "api-max-tokens", "api-tools-enabled", "provider-list", "capabilities",
     "sessions-panel", "sessions", "new-session", "fork-session", "refresh", "status-dot",
     "command-input", "toast",
     "nav-approval-hint", "nav-approval-badge", "nav-sessions-hint"
@@ -122,6 +148,11 @@ function bindEvents() {
   nodes.memoryIndex.addEventListener("click", e => withButton(e.currentTarget, refreshMemoryIndex()));
   nodes.apiRefresh.addEventListener("click", e => withButton(e.currentTarget, refreshApiConfig().then(() => { render(); showToast("模型配置已刷新", "success"); })));
   nodes.apiProvider.addEventListener("change", applyProviderDefaults);
+  nodes.apiToolsEnabled.addEventListener("click", event => {
+    const target = event.target instanceof Element ? event.target.closest("[data-tools-enabled]") : null;
+    if (!target || !nodes.apiToolsEnabled.contains(target)) return;
+    setToolsEnabledControl(target.dataset.toolsEnabled === "true");
+  });
 
   nodes.promptForm.addEventListener("submit", e => {
     e.preventDefault();
@@ -322,6 +353,7 @@ async function switchWorkspace() {
   state.sessionId = "";
   state.cursor = 0;
   state.events = [];
+  state.eventIds.clear();
   state.localEvents = [];
   state.sessions = [];
   state.snapshot = null;
@@ -376,6 +408,7 @@ async function createSession() {
   state.sessionId = created.session_id;
   state.cursor = 0;
   state.events = [];
+  state.eventIds.clear();
   state.localEvents = [];
   state.renderCache = {};
   await refreshWorkspace();
@@ -392,6 +425,7 @@ async function forkCurrentSession() {
   state.sessionId = created.session_id;
   state.cursor = 0;
   state.events = [];
+  state.eventIds.clear();
   state.localEvents = [];
   state.renderCache = {};
   await refreshWorkspace();
@@ -406,6 +440,7 @@ async function selectSession(sessionId) {
   state.sessionId = sessionId;
   state.cursor = 0;
   state.events = [];
+  state.eventIds.clear();
   state.localEvents = [];
   state.renderCache = {};
   nodes.sessionsPanel.classList.remove("open");
@@ -595,18 +630,44 @@ async function saveApiConfig() {
     nodes.apiKeyEnv.focus();
     return;
   }
-  const values = [
-    ["model.provider", nodes.apiProvider.value.trim() || "fake"],
-    ["model.model", nodes.apiModel.value.trim() || "fake-local"],
-    ["model.base_url", nodes.apiBaseUrl.value.trim()],
-    ["model.api_key_env", apiKeyEnv]
-  ];
-  for (const [path, value] of values) {
-    await request("/api/config/set", { method: "POST", body: { path, value } });
+  const generationOptions = readGenerationOptions();
+  if (!generationOptions) return;
+  const toolsEnabled = toolsEnabledFromControl();
+  const modeChanged = toolsEnabled !== runtimeToolsEnabled();
+  const activeRun = isAgentRunning();
+  if (activeRun && modeChanged) {
+    setToolsEnabledControl(runtimeToolsEnabled());
+    showToast("当前会话正在运行，停止后再切换 Chat / Agent 模式。", "error");
+    return;
   }
+  await request("/api/config/set", {
+    method: "POST",
+    body: { path: "runtime.tools_enabled", value: toolsEnabled }
+  });
+  await request("/api/models/select", {
+    method: "POST",
+    body: {
+      provider: nodes.apiProvider.value.trim() || "fake",
+      model: nodes.apiModel.value.trim() || "fake-local",
+      base_url: nodes.apiBaseUrl.value.trim(),
+      api_key_env: apiKeyEnv,
+      temperature: generationOptions.temperature,
+      max_tokens: generationOptions.maxTokens
+    }
+  });
   await refreshApiConfig();
   renderApiConfig();
-  showToast("模型配置已保存。API Key 请通过环境变量提供。", "success");
+  if (modeChanged) {
+    await createSession();
+    showToast(toolsEnabled ? "已切换到 Agent 模式，并创建新会话。" : "已切换到 Chat 模式，并创建新会话。", "success");
+    return;
+  }
+  if (activeRun) {
+    showToast("模型配置已保存。当前会话仍使用原 Provider；新建会话后应用新配置。", "success");
+    return;
+  }
+  await createSession();
+  showToast("模型配置已保存，已创建新会话应用新 Provider。", "success");
 }
 
 async function runCommand(command) {
@@ -749,20 +810,202 @@ function renderEvents() {
   const visibleItems = conversationEvents(allItems).slice(-120);
   const detailItems = detailEvents(allItems).slice(-160);
   const fp = fingerprint({
-    visible: visibleItems.map(event => [event.type, event.timestamp, event.message, event.delta]),
-    detailCount: detailItems.length,
-    lastDetail: detailItems[detailItems.length - 1]?.timestamp || 0
+    visible: visibleItems.map(event => [event.event_id, event.type, event.timestamp, event.message, event.delta]),
+    details: detailItems.map(event => [event.event_id, event.type, event.timestamp, event.message, event.delta, event.tool_name])
   });
   if (shouldSkip("events", fp)) return;
 
   const nearBottom = nodes.events.scrollHeight - nodes.events.scrollTop - nodes.events.clientHeight < 120;
   if (!visibleItems.length) {
-    nodes.events.innerHTML = welcomeHtml();
+    if (!nodes.events.querySelector(".welcome")) nodes.events.innerHTML = welcomeHtml();
   } else {
-    const detailBlock = detailItems.length ? renderConversationDetails(detailItems) : "";
-    nodes.events.innerHTML = visibleItems.map(renderConversationItem).join("") + detailBlock;
+    const welcome = nodes.events.querySelector(".welcome");
+    if (welcome) welcome.remove();
+    reconcileConversationItems(visibleItems);
+    reconcileConversationDetails(detailItems);
   }
-  if (nearBottom) nodes.events.scrollTop = nodes.events.scrollHeight;
+  if (nearBottom) scrollEventsToBottom();
+}
+
+function reconcileConversationItems(items) {
+  const details = findRunDetails();
+  const expected = new Set();
+  const existing = new Map(
+    Array.from(nodes.events.children)
+      .filter(node => node instanceof HTMLElement && node.dataset.conversationKey)
+      .map(node => [node.dataset.conversationKey, node])
+  );
+
+  let anchor = details;
+  for (const event of [...items].reverse()) {
+    const key = conversationEventKey(event);
+    expected.add(key);
+    let node = existing.get(key);
+    if (!node) {
+      node = markupElement(renderConversationItem(event));
+      node.dataset.conversationKey = key;
+      node.dataset.renderFingerprint = "";
+    }
+    updateConversationElement(node, event);
+    if (node.parentElement !== nodes.events || node.nextElementSibling !== anchor) {
+      nodes.events.insertBefore(node, anchor);
+    }
+    anchor = node;
+  }
+
+  for (const [key, node] of existing) {
+    if (!expected.has(key)) node.remove();
+  }
+}
+
+function reconcileConversationDetails(items) {
+  let details = findRunDetails();
+  if (!items.length) {
+    if (details) details.remove();
+    return;
+  }
+
+  if (!details) {
+    details = document.createElement("details");
+    details.className = "run-details";
+    details.dataset.runDetails = "true";
+    details.innerHTML = "<summary><span></span><small></small></summary><div class=\"run-event-list\"></div>";
+    nodes.events.append(details);
+  }
+
+  updateRunDetailsSummary(details, items);
+  const list = details.querySelector(".run-event-list");
+  if (!(list instanceof HTMLElement)) return;
+  const expected = new Set();
+  const existing = new Map(
+    Array.from(list.children)
+      .filter(node => node instanceof HTMLElement && node.dataset.detailKey)
+      .map(node => [node.dataset.detailKey, node])
+  );
+
+  let anchor = null;
+  for (const event of [...items].reverse()) {
+    const key = detailEventKey(event);
+    expected.add(key);
+    let node = existing.get(key);
+    if (!node) {
+      node = markupElement(renderDetailItem(event));
+      node.dataset.detailKey = key;
+      node.dataset.renderFingerprint = "";
+    }
+    updateMarkupElement(node, renderDetailItem(event));
+    if (node.parentElement !== list || node.nextElementSibling !== anchor) list.insertBefore(node, anchor);
+    anchor = node;
+  }
+
+  for (const [key, node] of existing) {
+    if (!expected.has(key)) node.remove();
+  }
+}
+
+function findRunDetails() {
+  return Array.from(nodes.events.children).find(
+    node => node instanceof HTMLElement && node.dataset.runDetails === "true"
+  ) || null;
+}
+
+function updateRunDetailsSummary(details, items) {
+  const toolCount = items.filter(event => event.type === "tool_call").length;
+  const approvalCount = items.filter(event => event.type === "approval_required").length;
+  const errorCount = items.filter(event => event.is_error || String(event.type || "").endsWith("_failed")).length;
+  const fingerprintValue = `${items.length}:${toolCount}:${approvalCount}:${errorCount}`;
+  if (details.dataset.summaryFingerprint === fingerprintValue) return;
+
+  const summary = details.querySelector("summary");
+  if (!(summary instanceof HTMLElement)) return;
+  const title = summary.querySelector("span");
+  const meta = summary.querySelector("small");
+  if (title) title.textContent = "执行细节";
+  if (meta) meta.textContent = `${items.length} 个事件 · ${toolCount} 个工具 · ${approvalCount} 个审批 · ${errorCount} 个错误`;
+  details.dataset.summaryFingerprint = fingerprintValue;
+}
+
+function markupElement(markup) {
+  const template = document.createElement("template");
+  template.innerHTML = markup.trim();
+  const element = template.content.firstElementChild;
+  if (!(element instanceof HTMLElement)) throw new Error("Expected a rendered HTML element.");
+  return element;
+}
+
+function updateMarkupElement(node, markup) {
+  const next = markupElement(markup);
+  const fingerprintValue = next.outerHTML;
+  if (node.dataset.renderFingerprint === fingerprintValue) return;
+  if (node.className !== next.className) node.className = next.className;
+  node.innerHTML = next.innerHTML;
+  node.dataset.renderFingerprint = fingerprintValue;
+}
+
+function updateConversationElement(node, event) {
+  const presentation = conversationPresentation(event);
+  const fingerprintValue = fingerprint([presentation.kind, presentation.label, presentation.text, presentation.avatar, presentation.timestamp]);
+  if (node.dataset.renderFingerprint === fingerprintValue) return;
+
+  if (!node.matches(`article.message.${presentation.kind}`)) {
+    updateMarkupElement(node, messageHtml(presentation.kind, presentation.label, presentation.text, presentation.avatar, presentation.timestamp));
+    return;
+  }
+
+  const avatar = node.querySelector(".message-avatar");
+  const label = node.querySelector(".bubble-label");
+  const paragraph = node.querySelector(".bubble > p");
+  if (!(avatar instanceof HTMLElement) || !(label instanceof HTMLElement) || !(paragraph instanceof HTMLElement)) {
+    updateMarkupElement(node, messageHtml(presentation.kind, presentation.label, presentation.text, presentation.avatar, presentation.timestamp));
+    return;
+  }
+
+  setText(avatar, presentation.avatar);
+  updateMessageLabel(label, presentation.label, presentation.timestamp);
+  setText(paragraph, presentation.text || "暂无内容");
+  node.dataset.renderFingerprint = fingerprintValue;
+}
+
+function updateMessageLabel(label, text, timestamp) {
+  const timeText = timestamp ? formatTime(timestamp) : "";
+  let textNode = Array.from(label.childNodes).find(node => node.nodeType === Node.TEXT_NODE);
+  if (!textNode) {
+    textNode = document.createTextNode("");
+    label.prepend(textNode);
+  }
+  if (textNode.nodeValue !== text) textNode.nodeValue = text;
+
+  let time = label.querySelector("time");
+  if (!timeText) {
+    if (time) time.remove();
+    return;
+  }
+  if (!(time instanceof HTMLElement)) {
+    time = document.createElement("time");
+    label.append(time);
+  }
+  setText(time, timeText);
+}
+
+function conversationEventKey(event) {
+  if (event.__assistantStreamKey) return `assistant-stream:${event.__assistantStreamKey}`;
+  return stableEventKey("conversation", event);
+}
+
+function detailEventKey(event) {
+  return stableEventKey("detail", event);
+}
+
+function stableEventKey(prefix, event) {
+  if (event.event_id !== null && event.event_id !== undefined) return `${prefix}:event:${event.event_id}`;
+  return `${prefix}:${event.type || "event"}:${event.session_id || "session"}:${event.turn_id ?? "turn"}:${event.timestamp ?? "time"}:${event.__order ?? "order"}`;
+}
+
+function scrollEventsToBottom() {
+  const previous = nodes.events.style.scrollBehavior;
+  nodes.events.style.scrollBehavior = "auto";
+  nodes.events.scrollTop = nodes.events.scrollHeight;
+  nodes.events.style.scrollBehavior = previous;
 }
 
 function orderedEvents() {
@@ -778,8 +1021,9 @@ function eventTime(event) {
 }
 
 function conversationEvents(items) {
+  const displayItems = compactAssistantStreamEvents(items);
   const output = [];
-  for (const event of items) {
+  for (const event of displayItems) {
     const type = event.type || "";
     const text = event.message || event.delta || "";
     if (type === "local_user_prompt") {
@@ -797,14 +1041,96 @@ function conversationEvents(items) {
   return output;
 }
 
+function compactAssistantStreamEvents(items) {
+  const output = [];
+  for (const event of items) {
+    const type = event.type || "";
+    const text = event.message || event.delta || "";
+    if (!isAssistantEvent(type) || !text) {
+      output.push(event);
+      continue;
+    }
+
+    const previousIndex = output.length - 1;
+    const previous = output[previousIndex];
+    const streamKey = assistantStreamKey(event);
+    const continuesPreviousStream = isAssistantStreamEvent(type)
+      && previous?.__assistantStreamOpen === true
+      && previous.__assistantStreamKey === streamKey;
+
+    if (continuesPreviousStream) {
+      output[previousIndex] = {
+        ...previous,
+        delta: `${previous.message || previous.delta || ""}${text}`,
+        message: null,
+        timestamp: event.timestamp || previous.timestamp
+      };
+      continue;
+    }
+
+    const completesPreviousStream = isAssistantMessageEvent(type)
+      && previous?.__assistantStreamOpen === true
+      && previous.__assistantStreamKey === streamKey;
+    if (completesPreviousStream) {
+      output[previousIndex] = {
+        ...event,
+        __assistantStreamKey: streamKey,
+        __assistantStreamOpen: false
+      };
+      continue;
+    }
+
+    if (isAssistantStreamEvent(type)) {
+      output.push({
+        ...event,
+        message: null,
+        delta: text,
+        __assistantStreamKey: streamKey,
+        __assistantStreamOpen: true
+      });
+      continue;
+    }
+
+    output.push(event);
+  }
+  return output;
+}
+
+function assistantStreamKey(event) {
+  const turnId = event.turn_id;
+  if (turnId === null || turnId === undefined) {
+    return `event:${event.event_id || event.__order || 0}`;
+  }
+  return `${event.session_id || "session"}:${turnId}`;
+}
+
 function detailEvents(items) {
   return items.filter(event => {
     const type = event.type || "";
     if (type === "local_user_prompt") return false;
-    if (isAssistantEvent(type) && (event.message || event.delta || "").trim()) return false;
-    return true;
+    if (isAssistantStreamEvent(type)) return false;
+    if (isAssistantMessageEvent(type) && (event.message || event.delta || "").trim()) return false;
+    if (isUserVisibleError(event)) return true;
+    return EXECUTION_DETAIL_EVENT_TYPES.has(type);
   });
 }
+
+// Backend lifecycle telemetry remains available for diagnostics, but it is not
+// user-visible execution work and must not inflate the activity count.
+const EXECUTION_DETAIL_EVENT_TYPES = new Set([
+  "tool_call",
+  "tool_result",
+  "tool_error",
+  "tool_calls_limited",
+  "approval_required",
+  "approval_approved",
+  "approval_rejected",
+  "approval_stale",
+  "approval_invalid",
+  "checkpoint_created",
+  "checkpoint_rewound",
+  "agent_cancelled"
+]);
 
 function isUserVisibleError(event) {
   const type = event.type || "";
@@ -829,19 +1155,30 @@ function welcomeHtml() {
 }
 
 function renderConversationItem(event) {
+  const presentation = conversationPresentation(event);
+  return messageHtml(presentation.kind, presentation.label, presentation.text, presentation.avatar, presentation.timestamp);
+}
+
+function conversationPresentation(event) {
   const type = event.type || "";
   const text = event.message || event.delta || "";
   if (type === "local_user_prompt") {
-    return messageHtml("user", "你", text, "你", event.timestamp);
+    return { kind: "user", label: "你", text, avatar: "你", timestamp: event.timestamp };
   }
   if (isAssistantEvent(type)) {
-    return messageHtml("assistant", "CodeMuse", text, "CM", event.timestamp);
+    return { kind: "assistant", label: "CodeMuse", text, avatar: "CM", timestamp: event.timestamp };
   }
-  return messageHtml("error", "错误", text || detailsText(event.details) || "暂无详情", "!", event.timestamp);
+  return {
+    kind: "error",
+    label: "错误",
+    text: text || detailsText(event.details) || "暂无详情",
+    avatar: "!",
+    timestamp: event.timestamp
+  };
 }
 
 function renderConversationDetails(items) {
-  const toolCount = items.filter(event => event.tool_name || String(event.type || "").startsWith("tool_")).length;
+  const toolCount = items.filter(event => event.type === "tool_call").length;
   const approvalCount = items.filter(event => event.type === "approval_required").length;
   const errorCount = items.filter(event => event.is_error || String(event.type || "").endsWith("_failed")).length;
   return `<details class="run-details">
@@ -882,8 +1219,11 @@ function messageHtml(kind, label, text, avatar, timestamp) {
 
 function renderTerminal() {
   if (!state.terminalOpen) return;
-  const items = state.localEvents.concat(state.events).slice(-80);
-  const fp = items.length + ":" + (items[items.length - 1]?.timestamp || 0) + ":" + (state.snapshot?.state?.phase || "");
+  const items = compactAssistantStreamEvents(state.localEvents.concat(state.events)).slice(-80);
+  const fp = fingerprint({
+    items: items.map(event => [event.type, event.timestamp, event.message, event.delta, event.tool_name]),
+    phase: state.snapshot?.state?.phase || ""
+  });
   if (shouldSkip("terminal", fp)) return;
 
   const lines = [
@@ -1069,6 +1409,9 @@ function renderApiConfig() {
   setInputValue(nodes.apiModel, model.model || "fake-local");
   setInputValue(nodes.apiBaseUrl, model.base_url || "");
   setInputValue(nodes.apiKeyEnv, model.api_key_env || "");
+  setInputValue(nodes.apiTemperature, model.temperature ?? "");
+  setInputValue(nodes.apiMaxTokens, model.max_tokens ?? "");
+  setToolsEnabledControl(runtimeToolsEnabled());
 
   const current = readinessFor(nodes.apiProvider.value || "fake");
   nodes.apiStatus.textContent = current
@@ -1089,10 +1432,10 @@ function renderApiConfig() {
 
 function renderProviderOptions() {
   const providers = state.providers.length ? state.providers : state.providerReadiness;
-  const names = providers.length ? providers.map(item => item.name || item.provider || String(item)) : ["fake"];
-  const uniq = [...new Set(names)];
-  const existing = Array.from(nodes.apiProvider.options).map(o => o.value).join("|");
-  const next = uniq.join("|");
+  const names = providers.map(item => item.name || item.provider || String(item));
+  const uniq = [...new Set([...Object.keys(PROVIDER_DEFAULTS), ...names])];
+  const existing = Array.from(nodes.apiProvider.options).map(o => `${o.value}:${o.textContent}`).join("|");
+  const next = uniq.map(name => `${name}:${providerLabel(name)}`).join("|");
   if (existing === next) return;
   const current = nodes.apiProvider.value;
   nodes.apiProvider.innerHTML = uniq.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(providerLabel(name))}</option>`).join("");
@@ -1121,16 +1464,18 @@ function renderCapabilities() {
 /* ============ HELPERS ============ */
 /* ============ HELPERS ============ */
 function applyProviderDefaults() {
-  const ready = readinessFor(nodes.apiProvider.value);
-  if (!nodes.apiModel.value.trim()) {
-    nodes.apiModel.value = ready?.model || (nodes.apiProvider.value === "fake" ? "fake-local" : "");
-  }
-  if (!nodes.apiBaseUrl.value.trim() && ready?.base_url) {
-    nodes.apiBaseUrl.value = ready.base_url;
-  }
-  if (!nodes.apiKeyEnv.value.trim() && ready?.api_key_env) {
-    nodes.apiKeyEnv.value = ready.api_key_env;
-  }
+  const provider = nodes.apiProvider.value;
+  const defaults = providerDefaultsFor(provider);
+  nodes.apiModel.value = defaults.default_model;
+  nodes.apiBaseUrl.value = defaults.default_base_url;
+  nodes.apiKeyEnv.value = defaults.default_api_key_env;
+  nodes.apiTemperature.value = defaults.default_temperature ?? "";
+  nodes.apiMaxTokens.value = defaults.default_max_tokens ?? "";
+
+  const readiness = readinessFor(provider);
+  nodes.apiStatus.textContent = readiness
+    ? `${providerLabel(provider)}：${readiness.ready ? "已就绪" : "未就绪"}${defaults.default_api_key_env ? `，环境变量 ${defaults.default_api_key_env}` : ""}`
+    : `${providerLabel(provider)}：保存后使用此配置`;
 }
 
 function startAvatarLoop() {
@@ -1159,11 +1504,79 @@ function isAgentRunning() {
 }
 
 function isAssistantEvent(type) {
-  return ["assistant_delta", "assistant_message", "prompt_completed", "message"].includes(type);
+  return isAssistantStreamEvent(type) || isAssistantMessageEvent(type);
+}
+
+function isAssistantStreamEvent(type) {
+  return ["message_delta", "assistant_delta"].includes(type);
+}
+
+function isAssistantMessageEvent(type) {
+  return ["assistant_message", "message"].includes(type);
 }
 
 function readinessFor(provider) {
   return state.providerReadiness.find(item => item.name === provider);
+}
+
+function providerDefaultsFor(provider) {
+  const descriptor = state.providers.find(item => (item.name || item.provider) === provider) || {};
+  const readiness = readinessFor(provider) || {};
+  const fallback = PROVIDER_DEFAULTS[provider] || {};
+  return {
+    default_model: descriptor.default_model ?? readiness.model ?? fallback.default_model ?? "",
+    default_base_url: descriptor.default_base_url ?? readiness.base_url ?? fallback.default_base_url ?? "",
+    default_api_key_env: descriptor.default_api_key_env ?? readiness.api_key_env ?? fallback.default_api_key_env ?? "",
+    default_temperature: descriptor.default_temperature ?? readiness.temperature ?? fallback.default_temperature ?? null,
+    default_max_tokens: descriptor.default_max_tokens ?? readiness.max_tokens ?? fallback.default_max_tokens ?? null
+  };
+}
+
+function readGenerationOptions() {
+  const rawTemperature = nodes.apiTemperature.value.trim();
+  if (rawTemperature) {
+    const temperature = Number(rawTemperature);
+    if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+      showToast("Temperature 必须是 0 到 2 之间的数字。", "error");
+      nodes.apiTemperature.focus();
+      return null;
+    }
+  }
+
+  const rawMaxTokens = nodes.apiMaxTokens.value.trim();
+  if (rawMaxTokens) {
+    const maxTokens = Number(rawMaxTokens);
+    if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) {
+      showToast("Max tokens 必须是大于 0 的整数。", "error");
+      nodes.apiMaxTokens.focus();
+      return null;
+    }
+  }
+
+  return {
+    temperature: rawTemperature ? Number(rawTemperature) : null,
+    maxTokens: rawMaxTokens ? Number(rawMaxTokens) : null
+  };
+}
+
+function runtimeToolsEnabled() {
+  const runtime = state.config?.config?.runtime || state.config?.runtime || {};
+  return runtime.tools_enabled !== false;
+}
+
+function toolsEnabledFromControl() {
+  return nodes.apiToolsEnabled?.dataset.toolsEnabled !== "false";
+}
+
+function setToolsEnabledControl(toolsEnabled) {
+  if (!nodes.apiToolsEnabled) return;
+  const enabled = toolsEnabled !== false;
+  nodes.apiToolsEnabled.dataset.toolsEnabled = String(enabled);
+  for (const button of nodes.apiToolsEnabled.querySelectorAll("[data-tools-enabled]")) {
+    const selected = button.dataset.toolsEnabled === String(enabled);
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  }
 }
 
 function setInputValue(input, value) {
@@ -1284,12 +1697,14 @@ function eventLabel(value) {
     tool_call: "调用工具",
     tool_result: "工具结果",
     tool_error: "工具错误",
+    tool_calls_limited: "工具调用已限制",
     approval_required: "需要审批",
     approval_rejected: "审批拒绝",
     approval_stale: "审批已过期",
     approval_invalid: "审批无效",
     checkpoint_created: "检查点已创建",
     checkpoint_rewound: "检查点已回滚",
+    message_delta: "助手输出",
     assistant_delta: "助手输出",
     assistant_message: "助手消息",
     message: "消息",
@@ -1350,7 +1765,7 @@ function riskLabel(value) {
 }
 
 function providerLabel(value) {
-  const labels = { fake: "本地模拟", openai_compatible: "OpenAI 兼容", bailian: "百炼" };
+  const labels = { fake: "本地模拟", openai_compatible: "OpenAI 兼容 / 自定义中转", bailian: "百炼", deepseek: "DeepSeek" };
   return labels[value] || value || "Provider";
 }
 

@@ -95,6 +95,13 @@ class ServerApiTests(unittest.TestCase):
             self.assertTrue(any(item["session_id"] == session_id for item in sessions))
             self.assertTrue(any(event["type"] == "local_user_prompt" and event["message"] == "list files" for event in restored_events))
             self.assertTrue(any(event["type"] == "message" for event in restored_events))
+            self.assertFalse(any(event["type"] in {"tool_result", "tool_error"} for event in restored_events))
+            self.assertTrue(
+                any(
+                    message.role == "tool" and message.tool_name == "list_files"
+                    for message in restored_handle.runtime.state.messages
+                )
+            )
 
     def test_session_manager_forks_context_and_returns_tree(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -314,10 +321,60 @@ class ServerApiTests(unittest.TestCase):
                 )
                 config = _json_request(f"{base}/api/config")
 
-                self.assertTrue(any(item["name"] == "openai_compatible" for item in providers["providers"]))
+                providers_by_name = {item["name"]: item for item in providers["providers"]}
+                self.assertTrue({"fake", "openai_compatible", "bailian", "deepseek"}.issubset(providers_by_name))
+                self.assertEqual(providers_by_name["deepseek"]["default_model"], "deepseek-chat")
+                self.assertEqual(providers_by_name["deepseek"]["default_base_url"], "https://api.deepseek.com/v1")
+                self.assertEqual(providers_by_name["deepseek"]["default_api_key_env"], "DEEPSEEK_API_KEY")
                 self.assertTrue(any(item["name"] == "fake" for item in readiness["providers"]))
                 self.assertEqual(updated["config"]["model"]["provider"], "openai_compatible")
                 self.assertEqual(config["config"]["model"]["provider"], "openai_compatible")
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_http_server_exposes_config_patch_runtime_and_capability_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            manager = WebSessionManager(default_workspace=root)
+            server = CodeMuseServer(("127.0.0.1", 0), manager)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                patched = _json_request(f"{base}/api/config/patch", method="POST", payload={"patch": {"runtime": {"max_turns": 5}, "capabilities": {"web_enabled": False}}})
+                overridden = _json_request(f"{base}/api/config/runtime/set", method="POST", payload={"path": "runtime.max_turns", "value": 2})
+                inventory = _json_request(f"{base}/api/capability-config")
+                cleared = _json_request(f"{base}/api/config/runtime/clear", method="POST", payload={})
+                self.assertEqual(patched["config"]["runtime"]["max_turns"], 5)
+                self.assertEqual(overridden["config"]["runtime"]["max_turns"], 2)
+                self.assertFalse(inventory["settings"]["web_enabled"])
+                self.assertGreater(inventory["counts"]["builtin_tool"], 0)
+                self.assertEqual(cleared["config"]["runtime"]["max_turns"], 5)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_web_model_provider_picker_lists_supported_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            manager = WebSessionManager(default_workspace=root)
+            server = CodeMuseServer(("127.0.0.1", 0), manager)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                index = _raw_request(f"{base}/")
+                app = _raw_request(f"{base}/app.js")
+
+                for provider in ("fake", "openai_compatible", "bailian", "deepseek"):
+                    self.assertIn(f'value="{provider}"', index)
+                    self.assertIn(f"{provider}:", app)
+                self.assertIn("descriptor.default_model", app)
+                self.assertIn("descriptor.default_base_url", app)
+                self.assertIn("descriptor.default_api_key_env", app)
             finally:
                 server.shutdown()
                 server.server_close()

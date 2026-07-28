@@ -13,6 +13,8 @@ from codemuse.api import sdk
 from codemuse.app.bootstrap import create_capability_catalog
 from codemuse.server.session_manager import WebSessionManager
 from codemuse.tools.repo_git import inspect_git_status, list_repo_cache
+from codemuse.server.routes.capability_config import capability_inventory
+from codemuse.server.routes.config import clear_runtime_payload, patch_config_payload, set_config_payload, set_runtime_payload
 
 _IGNORED_BROWSER_DIRS = {
     ".git",
@@ -31,6 +33,14 @@ _IGNORED_BROWSER_DIRS = {
 _TEXT_PREVIEW_LIMIT = 256 * 1024
 _TREE_CHILD_LIMIT = 400
 _MAX_JSON_BODY_BYTES = 1024 * 1024
+_MODEL_SELECTION_FIELDS = {
+    "provider",
+    "model",
+    "base_url",
+    "api_key_env",
+    "temperature",
+    "max_tokens",
+}
 
 _STATIC_ROUTES = {
     "/": "index.html",
@@ -91,6 +101,9 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
                 kind = _string_query(query, "kind", default="")
                 catalog = create_capability_catalog(self.server.manager.default_workspace)
                 self._send_json({"capabilities": [item.to_dict() for item in catalog.list(kind=kind or None)]})
+                return
+            if parts == ["capability-config"]:
+                self._send_json(capability_inventory(self.server.manager.default_workspace))
                 return
             if parts == ["config"]:
                 self._send_json(sdk.get_config(self.server.manager.default_workspace))
@@ -184,11 +197,39 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
                 max_files = int(payload.get("max_files") or 300)
                 self._send_json(sdk.refresh_memory(self.server.manager.default_workspace, max_files=max_files), status=HTTPStatus.ACCEPTED)
                 return
+            if parts == ["models", "select"]:
+                unknown_fields = sorted(set(payload) - _MODEL_SELECTION_FIELDS)
+                if unknown_fields:
+                    raise ValueError(f"Unsupported model selection field: {unknown_fields[0]}")
+                self._send_json(
+                    sdk.configure_model_provider(
+                        self.server.manager.default_workspace,
+                        payload.get("provider"),
+                        model=payload.get("model"),
+                        base_url=payload.get("base_url"),
+                        api_key_env=payload.get("api_key_env"),
+                        temperature=payload.get("temperature"),
+                        max_tokens=payload.get("max_tokens"),
+                    )
+                )
+                return
             if parts == ["config", "set"]:
                 path = str(payload.get("path") or "").strip()
                 if not path:
                     raise ValueError("path is required.")
-                self._send_json(sdk.set_config_path(self.server.manager.default_workspace, path, payload.get("value")))
+                self._send_json(set_config_payload(self.server.manager.default_workspace, path, payload.get("value")))
+                return
+            if parts == ["config", "patch"]:
+                patch = payload.get("patch")
+                if not isinstance(patch, dict):
+                    raise ValueError("patch must be an object")
+                self._send_json(patch_config_payload(self.server.manager.default_workspace, patch))
+                return
+            if parts == ["config", "runtime", "set"]:
+                self._send_json(set_runtime_payload(self.server.manager.default_workspace, str(payload.get("path") or ""), payload.get("value")))
+                return
+            if parts == ["config", "runtime", "clear"]:
+                self._send_json(clear_runtime_payload(self.server.manager.default_workspace))
                 return
             if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "prompt":
                 prompt = str(payload.get("prompt") or "")
@@ -233,7 +274,11 @@ class CodeMuseRequestHandler(BaseHTTPRequestHandler):
                 if not checkpoint_id:
                     raise ValueError("checkpoint_id is required.")
                 handle = self.server.manager.get_session(parts[1])
-                job_id = handle.rewind(checkpoint_id)
+                mode = str(payload.get("mode") or "conversation_and_workspace")
+                if bool(payload.get("preview", False)):
+                    self._send_json(handle.preview_rewind(checkpoint_id, mode=mode))
+                    return
+                job_id = handle.rewind(checkpoint_id, mode=mode)
                 self._send_json({"session_id": handle.session_id, "job_id": job_id}, status=HTTPStatus.ACCEPTED)
                 return
             if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "cancel":

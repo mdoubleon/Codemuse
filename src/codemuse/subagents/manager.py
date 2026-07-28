@@ -10,17 +10,28 @@ from codemuse.llm.fake import FakeLLM
 from codemuse.llm.provider.base import LLMProvider
 from codemuse.memory.retrieval_hook import MemoryContextProvider
 from codemuse.runtime.runtime import AgentRuntime
+from codemuse.runtime.cancellation import CancellationToken
 from codemuse.storage.sessions import SessionStore
 from codemuse.subagents.catalog import SubAgentCatalog
 from codemuse.subagents.specs import SubAgentRunResult
 from codemuse.tools.registry import ToolRegistry
+from codemuse.tools.policy import ALLOW, ToolPolicyDecision, ToolPolicyEvaluator
+
+
+class _WorktreePolicyEvaluator(ToolPolicyEvaluator):
+    """Allow file mutations only inside an already isolated worktree runtime."""
+
+    def evaluate(self, spec):
+        if spec.permission_domain == "write" and spec.name in {"write_file", "replace_text", "apply_patch"}:
+            return ToolPolicyDecision(action=ALLOW, reason="isolated worktree mutation")
+        return super().evaluate(spec)
 
 
 class SubAgentManager:
     """运行受限子 Agent。
 
-    Stage 10 先实现单个同步子任务。子 Agent 复用 AgentRuntime，
-    但只能看到 allowlist 中的工具，避免递归和越权。
+    子 Agent 复用 AgentRuntime，只能看到 allowlist 中的工具；管理器同时支持
+    单任务和有并发上限的批量研究任务，写操作必须在隔离 worktree 中执行。
     """
 
     def __init__(
@@ -31,6 +42,7 @@ class SubAgentManager:
         session_store: SessionStore,
         catalog: SubAgentCatalog | None = None,
         llm_factory: Callable[[], LLMProvider] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> None:
         """注入该管理器需要协调的配置、注册表或存储依赖。"""
         self.workspace = workspace.resolve()
@@ -38,26 +50,30 @@ class SubAgentManager:
         self.session_store = session_store
         self.catalog = catalog or SubAgentCatalog()
         self.llm_factory = llm_factory or (lambda: FakeLLM())
+        self.cancellation_token = cancellation_token or CancellationToken()
 
     def list_specs(self) -> list[str]:
         """列出当前已注册的子 Agent 规格。"""
         return self.catalog.names()
 
-    def run_sync(self, *, spec_name: str, task: str, max_turns: int | None = None) -> SubAgentRunResult:
+    def run_sync(self, *, spec_name: str, task: str, max_turns: int | None = None, tool_workspace: Path | None = None) -> SubAgentRunResult:
         """同步创建受限子 Runtime，执行子任务并整理子 Agent 结果。"""
         started_at = time.time()
         spec = self.catalog.get(spec_name)
-        child_registry = self._restricted_registry(spec.tool_allowlist)
+        workspace = (tool_workspace or self.workspace).resolve()
+        child_registry = self._restricted_registry(spec.tool_allowlist, workspace=workspace)
         child_session = self.session_store.create(spec.system_prompt)
         self.session_store.save(child_session)
         runtime = AgentRuntime(
-            workspace=self.workspace,
+            workspace=workspace,
             llm=self.llm_factory(),
             tool_registry=child_registry,
             session_store=self.session_store,
             session=child_session,
             memory_provider=MemoryContextProvider(self.workspace),
             max_turns=max_turns or spec.max_turns,
+            cancellation_token=self.cancellation_token,
+            policy_evaluator=_WorktreePolicyEvaluator() if tool_workspace else None,
         )
         events = runtime.prompt(task)
         used_tools = [event.tool_name for event in events if event.tool_name and event.type in {"tool_call", "tool_result"}]
@@ -97,9 +113,10 @@ class SubAgentManager:
             "results": [result.to_dict() for result in results],
         }
 
-    def _restricted_registry(self, allowlist: list[str]) -> ToolRegistry:
+    def _restricted_registry(self, allowlist: list[str], *, workspace: Path | None = None) -> ToolRegistry:
         """为子 Agent 构造只包含 allowlist 工具的受限注册表。"""
-        child = ToolRegistry(self.workspace)
+        workspace = (workspace or self.workspace).resolve()
+        child = ToolRegistry(workspace)
         for name in allowlist:
             if name == "spawn_subagent":
                 continue
@@ -108,6 +125,11 @@ class SubAgentManager:
             tool = self.parent_registry.get(name)
             if not tool.spec.model_callable:
                 continue
-            # 当前阶段复用只读工具实例；后续 worktree 子 Agent 再做隔离工具实例。
+            # 只读任务可复用实例；worktree 写任务必须用隔离 workspace 重建工具。
+            if workspace != self.workspace:
+                try:
+                    tool = type(tool)(workspace)
+                except TypeError as exc:
+                    raise RuntimeError(f"Tool {name} cannot be isolated in a worktree") from exc
             child.register(tool, category=self.parent_registry.metadata()[name].category)
         return child

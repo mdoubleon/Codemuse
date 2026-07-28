@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 
 from codemuse.app.bootstrap import build_agent
 from codemuse.storage.checkpoints import CheckpointStore
+from codemuse.api import sdk
 
 
 class CheckpointRewindTests(unittest.TestCase):
@@ -99,6 +100,37 @@ class CheckpointRewindTests(unittest.TestCase):
             agent.rewind(checkpoint_id)
 
             self.assertFalse(target.exists())
+
+    def test_preview_and_conversation_only_rewind_do_not_change_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            agent = build_agent(root)
+            agent.prompt("hello")
+            checkpoint_id = str(agent.create_checkpoint("before changes")[0].details["checkpoint_id"])
+            target = root / "README.md"
+            target.write_text("changed outside rewind\n", encoding="utf-8")
+            preview = agent.preview_rewind(checkpoint_id, mode="conversation_only")
+            self.assertEqual(preview["restore_preview"], {})
+            agent.prompt("list files")
+            agent.rewind(checkpoint_id, mode="conversation_only")
+            self.assertEqual(target.read_text(encoding="utf-8"), "changed outside rewind\n")
+
+    def test_workspace_only_rewind_preserves_conversation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            agent = build_agent(root)
+            checkpoint_id = str(agent.create_checkpoint("workspace")[0].details["checkpoint_id"])
+            target = root / "README.md"
+            original = target.read_text(encoding="utf-8")
+            target.write_text("changed\n", encoding="utf-8")
+            agent.prompt("hello")
+            messages = [item.to_dict() for item in agent.state.messages]
+            agent.rewind(checkpoint_id, mode="workspace_only")
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+            self.assertEqual([item.to_dict() for item in agent.state.messages], messages)
+            self.assertEqual(sdk.preview_rewind(root, checkpoint_id, session_id=agent.session_id)["checkpoint_id"], checkpoint_id)
 
 
 def _write_sample_repo(root: Path) -> None:

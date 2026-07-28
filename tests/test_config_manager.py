@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -14,6 +16,7 @@ if str(SRC) not in sys.path:
 
 from codemuse.api import sdk
 from codemuse.app.bootstrap import build_agent
+from codemuse.config.env_file import load_env_file
 from codemuse.config.schema import ConfigValidationError
 
 
@@ -27,12 +30,22 @@ class ConfigManagerTests(unittest.TestCase):
             _write_mcp_config(root)
             _write_config(
                 root,
-                {"runtime": {"max_turns": 3, "history_token_budget": 4096}, "capabilities": {"mcp_enabled": False}},
+                {
+                    "runtime": {
+                        "max_turns": 3,
+                        "max_tool_calls_per_turn": 2,
+                        "max_tool_calls_per_prompt": 5,
+                        "history_token_budget": 4096,
+                    },
+                    "capabilities": {"mcp_enabled": False},
+                },
             )
 
             agent = build_agent(root)
 
             self.assertEqual(agent.max_turns, 3)
+            self.assertEqual(agent.max_tool_calls_per_turn, 2)
+            self.assertEqual(agent.max_tool_calls_per_prompt, 5)
             self.assertEqual(agent.history_token_budget, 4096)
             self.assertNotIn("mcp__demo__echo", agent.tool_registry.names())
 
@@ -64,6 +77,18 @@ class ConfigManagerTests(unittest.TestCase):
             self.assertEqual(snapshot["source_map"]["runtime.max_turns"], "runtime")
             self.assertEqual(agent.max_turns, 4)
 
+    def test_prompt_tool_call_budget_can_be_set_through_config(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+
+            snapshot = sdk.set_config_path(root, "runtime.max_tool_calls_per_prompt", 6)
+            agent = build_agent(root)
+
+            self.assertEqual(snapshot["config"]["runtime"]["max_tool_calls_per_prompt"], 6)
+            self.assertEqual(snapshot["source_map"]["runtime.max_tool_calls_per_prompt"], "project")
+            self.assertEqual(agent.max_tool_calls_per_prompt, 6)
+
     def test_unknown_config_path_is_rejected(self) -> None:
         """验证该场景下的输入、状态变化和输出是否符合预期。"""
         with tempfile.TemporaryDirectory() as raw:
@@ -78,6 +103,25 @@ class ConfigManagerTests(unittest.TestCase):
 
             with self.assertRaises(ConfigValidationError):
                 sdk.set_config_path(root, "runtime.history_token_budget", 128)
+
+    def test_env_file_loader_preserves_process_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            env_file = Path(raw) / ".env"
+            env_file.write_text(
+                "# local settings\n"
+                "CODEMUSE_TEST_KEY=from-file\n"
+                "PRESERVED_KEY=from-file\n"
+                "export QUOTED_VALUE='with spaces'\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"PRESERVED_KEY": "from-process"}, clear=True):
+                loaded = load_env_file(env_file)
+
+                self.assertEqual(loaded, ["CODEMUSE_TEST_KEY", "QUOTED_VALUE"])
+                self.assertEqual(os.environ["CODEMUSE_TEST_KEY"], "from-file")
+                self.assertEqual(os.environ["PRESERVED_KEY"], "from-process")
+                self.assertEqual(os.environ["QUOTED_VALUE"], "with spaces")
 
 
 def _write_sample_repo(root: Path) -> None:

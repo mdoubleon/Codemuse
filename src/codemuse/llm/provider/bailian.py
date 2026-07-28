@@ -16,14 +16,20 @@ class BailianProvider(OpenAICompatibleProvider):
         model: str,
         api_key_env: str = "DASHSCOPE_API_KEY",
         base_url: str = DEFAULT_BAILIAN_BASE_URL,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         timeout_seconds: int = 60,
+        max_retries: int = 2,
     ) -> None:
         """初始化 BailianProvider 并保存运行依赖。"""
         super().__init__(
             model=model,
             base_url=base_url,
             api_key_env=api_key_env or "DASHSCOPE_API_KEY",
+            temperature=temperature,
+            max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
         )
         self._info = LLMProviderInfo(provider="bailian", model=model, supports_tools=True, is_stub=False)
 

@@ -83,12 +83,22 @@ python -m unittest discover -s tests
 
 默认情况下，CodeMuse 可以使用本地确定性 FakeLLM，方便离线测试和学习流程。
 
-如果要使用 OpenAI-compatible 的真实模型，复制 `.env.example` 为 `.env`：
+复制 `.env.example` 为 `.env`。`scripts/run_agent.py` 和 `scripts/run_server.py` 都会加载它，且不会覆盖已存在的进程环境变量。
+
+使用自定义 OpenAI-compatible 中转站（或官方 OpenAI endpoint）时：
 
 ```env
 CODEMUSE_API_KEY=your_api_key_here
-CODEMUSE_BASE_URL=https://api.openai.com/v1
-CODEMUSE_MODEL=gpt-4o-mini
+CODEMUSE_BASE_URL=https://your-relay.example/v1
+CODEMUSE_MODEL=your-model
+CODEMUSE_PROVIDER=openai_compatible
+```
+
+使用 DeepSeek 专用适配器时：
+
+```env
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+CODEMUSE_PROVIDER=deepseek
 ```
 
 项目配置文件可以放在：
@@ -109,14 +119,48 @@ CODEMUSE_MODEL=gpt-4o-mini
   },
   "runtime": {
     "max_turns": 8,
+    "max_tool_calls_per_turn": 4,
     "history_token_budget": 16000
   }
 }
 ```
 
-`runtime.history_token_budget` 控制每次模型调用携带的持久化对话历史，替代固定消息条数窗口。CodeMuse 从最新消息向前选择完整上下文单元，工具输出过长时截断正文但保留 tool-call/tool-result 配对；当前用户输入始终完整保留。该预算不包含 system prompt、工具 schema 和当轮注入的长期记忆。
+也可以通过 CLI 选择 Provider。选择命令一次性写入整个 `model` 配置块，便于保留中转站的模型、地址和环境变量名：
 
-真实 API Key 不应该写进前端文件，也不应该提交到 GitHub。
+```powershell
+python scripts/run_agent.py models use openai_compatible `
+  --model your-model `
+  --base-url https://your-relay.example/v1 `
+  --api-key-env CODEMUSE_API_KEY
+
+python scripts/run_agent.py models use deepseek
+python scripts/run_agent.py models providers
+```
+
+Web 工作台中的 “OpenAI 兼容 / 自定义中转” 也是同一套配置入口。`api_key_env` 只保存环境变量名（如 `CODEMUSE_API_KEY` 或 `DEEPSEEK_API_KEY`），绝不保存真实 API Key。
+
+`runtime.max_turns` 控制一个任务最多可进行多少个工具回合，`runtime.max_tool_calls_per_turn` 控制模型单次响应最多执行多少个不同工具调用，默认是 4；重复的同名同参数调用会自动合并。模型仍自行决定是否调用工具。`runtime.history_token_budget` 控制每次模型调用携带的持久化对话历史，替代固定消息条数窗口。CodeMuse 从最新消息向前选择完整上下文单元，工具输出过长时截断正文但保留 tool-call/tool-result 配对；当前用户输入始终完整保留。该预算不包含 system prompt、工具 schema 和当轮注入的长期记忆。
+
+真实 API Key 不应该写进前端文件、`.codemuse/config.json` 或 GitHub。
+
+## 扩展能力入口
+
+CodeMuse 还提供以下与 pp-Echo 对齐、但按本项目标准库架构实现的入口：
+
+```powershell
+python scripts/run_agent.py tui --workspace .
+python scripts/run_agent.py rpc --workspace .
+```
+
+- `prompts/`：`.codemuse/prompts`、项目 `prompts` 和内置模板的分层加载。
+- `learning/`：在已持久化 turn 后生成安全候选，必须审核后才进入项目记忆。
+- `browser/`：受控静态网页导航、tab、snapshot 和链接 ref；不执行 JavaScript。
+- `web_tools/providers.py`：受审批的 `web_search`，通过 mode 路由 Web、新闻和 GitHub 查询。
+- `session/`：面向客户端的 `SessionClient` 和持久化 session 配置覆盖。
+- `api/json_mode.py`、`api/rpc_mode.py`：稳定 JSON lines 和 stdio RPC。
+- `subagents/worktree.py`：隔离修改、patch artifact、审批应用和 worktree 清理。
+
+Python SDK 同时提供 Learning 审核、MCP resources/prompts、session config、rewind preview 等机器接口。完整边界见 [docs/known-limitations.md](docs/known-limitations.md)。
 
 ## 项目结构
 
@@ -221,7 +265,7 @@ external   调用外部能力
 - 给自己的 Agent 项目做功能原型的起点。
 - 阅读其他 Agent 项目时的对照图谱：看到别人的 Runtime、ToolRegistry、Memory、Session，就能知道大概应该落在哪一层。
 
-它不是最终答案，也不是唯一正确架构。它更像一份可以运行的学习笔记：边写边理解，边拆边补齐。
+它不是唯一正确架构，而是一套强调标准库实现、显式审批和本地可审计存储的工程取舍。
 
 ## 文档
 
@@ -229,10 +273,10 @@ external   调用外部能力
 - [docs/demo.md](docs/demo.md)：五分钟演示脚本。
 - [docs/safety.md](docs/safety.md)：安全边界和审批机制。
 - [docs/known-limitations.md](docs/known-limitations.md)：当前限制。
+- [PROJECT_GUIDE.md](PROJECT_GUIDE.md)：开发、装配和发布检查指南。
+- [evals/README.md](evals/README.md)：确定性能力评测矩阵。
 
 ## 状态说明
 
-CodeMuse 仍然是个人学习项目，很多地方还可以继续完善，例如更完整的前端交互、真实 provider 的流式输出、更细的权限策略、更强的记忆去重和更完整的多 Agent 编排。
-
-我会持续把学习过程中觉得有价值的 Agent 工程能力整理进来，并尽量保持代码结构清楚、文档可读、功能可运行。
+CodeMuse 已覆盖 pp-Echo 的核心 Coding Agent 能力面，并通过单元/集成测试、Web smoke、五步 demo 和 68-case baseline 验证。两者不是逐文件复制：CodeMuse 保留零第三方运行依赖、dataclass、JSON/JSONL 存储和更保守的浏览器/扩展执行边界；准确限制以 [docs/known-limitations.md](docs/known-limitations.md) 为准。
 

@@ -7,6 +7,7 @@ import json
 
 from codemuse.capabilities.descriptor import CapabilityDescriptor
 from codemuse.extensions.loader import ExtensionDescriptor, load_extensions
+from codemuse.domain.messages import ChatMessage
 
 
 @dataclass
@@ -79,6 +80,36 @@ class ExtensionRuntime:
                     }
                 )
         return tools
+
+    def install_hooks(self, hooks) -> list[str]:
+        """Install declarative manifest hooks without importing extension code."""
+        installed: list[str] = []
+        for extension in self.available_extensions().values():
+            if extension.status != "loaded":
+                continue
+            payload = self._manifest_payload(extension)
+            hook_config = payload.get("hooks")
+            if not isinstance(hook_config, dict):
+                continue
+            context_template = hook_config.get("context_template")
+            if isinstance(context_template, str) and context_template.strip():
+                def inject(_state, messages, template=context_template, item=extension):
+                    text = template.format(name=item.name, version=item.version)
+                    message = ChatMessage.text("system", text)
+                    message.metadata["extension"] = item.name
+                    return [message, *messages]
+                hooks.add_transform_context_hook(extension.name, "extension", inject)
+                installed.append(f"{extension.name}:context_built")
+            lifecycle_events = hook_config.get("lifecycle_events")
+            if isinstance(lifecycle_events, list):
+                allowed = {str(value) for value in lifecycle_events if str(value).strip()}
+                if allowed:
+                    def observe(event, selected=allowed, item=extension):
+                        if event.type in selected:
+                            event.details.setdefault("extension_hooks", []).append(item.name)
+                    hooks.lifecycle_event_hooks.append(observe)
+                    installed.append(f"{extension.name}:lifecycle")
+        return installed
 
     def _manifest_payload(self, extension: ExtensionDescriptor) -> dict[str, object]:
         """处理 清单载荷。"""

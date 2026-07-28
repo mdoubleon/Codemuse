@@ -7,6 +7,7 @@ from typing import Any
 
 from codemuse.subagents.manager import SubAgentManager
 from codemuse.subagents.orchestrator import SubAgentOrchestrator
+from codemuse.subagents.worktree import WorktreeManager
 from codemuse.tools.base import BaseTool, ToolResult, ToolSpec
 
 
@@ -148,8 +149,40 @@ class OrchestrateAgentsTool(BaseTool):
         )
 
 
+class ApplyPatchArtifactTool(BaseTool):
+    """Apply a staged worktree patch after the normal CodeMuse approval flow."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="apply_patch_artifact",
+            description="Apply a reviewed patch artifact produced by an isolated subagent worktree.",
+            parameters={"type": "object", "properties": {"artifact_id": {"type": "string"}}, "required": ["artifact_id"]},
+            permission_domain="write",
+            requires_confirmation=True,
+            side_effect=True,
+        )
+
+    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        manager = WorktreeManager(self.workspace)
+        artifact = manager.load_artifact(str(arguments.get("artifact_id") or ""))
+        if artifact.status == "applied":
+            raise ValueError(f"Patch artifact already applied: {artifact.artifact_id}")
+        if not manager.apply_check(artifact):
+            raise RuntimeError("Patch artifact no longer applies cleanly to the parent workspace")
+        if not manager.apply(artifact):
+            raise RuntimeError("Failed to apply patch artifact")
+        manager.update_status(artifact, "applied")
+        manager.cleanup(artifact)
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=f"Applied patch artifact {artifact.artifact_id}.",
+            details={"artifact": artifact.to_dict(), "changed_paths": artifact.changed_paths},
+        )
+
 def register_subagent_tools(registry, workspace: Path, manager: SubAgentManager) -> None:
     """注册子 Agenttools。"""
     registry.register(SpawnSubAgentTool(workspace, manager), category="subagent")
     registry.register(RunSubAgentPlanTool(workspace, manager), category="subagent")
     registry.register(OrchestrateAgentsTool(workspace, manager), category="subagent")
+    registry.register(ApplyPatchArtifactTool(workspace), category="subagent")

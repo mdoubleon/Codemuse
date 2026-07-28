@@ -60,17 +60,17 @@ class ConfigManager:
     def get_snapshot(self) -> ConfigSnapshot:
         """返回包含配置来源和有效配置的快照。"""
         with self._lock:
-            default_payload = default_config().to_dict()
             environment = _environment_config_patch()
             project = self._read_project_config()
             runtime = runtime_overrides.get(self.workspace)
-            effective = merge_patch(merge_patch(merge_patch(default_payload, environment), project), runtime)
-            config = CodeMuseConfig.from_dict(effective)
+            config = CodeMuseConfig.from_dict(
+                _merged_config_payload(environment=environment, project=project, runtime=runtime)
+            )
             return ConfigSnapshot(
                 config=config,
                 project_config=project,
                 runtime_config=runtime,
-                effective_config=effective,
+                effective_config=config.to_dict(),
                 source_map=_source_map(environment, project, runtime),
                 changed_paths=sorted(set(
                     changed_paths_from_patch(environment)
@@ -88,7 +88,7 @@ class ConfigManager:
             updated = merge_patch(current, patch)
             if not isinstance(updated, dict):
                 raise ValueError("Project config must remain a JSON object.")
-            CodeMuseConfig.from_dict(merge_patch(default_config().to_dict(), updated))
+            CodeMuseConfig.from_dict(_merged_config_payload(project=updated))
             self._write_project_config(updated)
             return self.get_snapshot()
 
@@ -97,7 +97,7 @@ class ConfigManager:
         with self._lock:
             current = self._read_project_config()
             updated = set_path_value(current, path, value)
-            CodeMuseConfig.from_dict(merge_patch(default_config().to_dict(), updated))
+            CodeMuseConfig.from_dict(_merged_config_payload(project=updated))
             self._write_project_config(updated)
             return self.get_snapshot()
 
@@ -105,7 +105,7 @@ class ConfigManager:
         """把单个点路径值写入运行时覆盖存储。"""
         runtime_overrides.set_path(self.workspace, path, value)
         # 运行时覆盖只影响当前进程，不写入 .codemuse/config.json。
-        CodeMuseConfig.from_dict(merge_patch(default_config().to_dict(), runtime_overrides.get(self.workspace)))
+        CodeMuseConfig.from_dict(_merged_config_payload(runtime=runtime_overrides.get(self.workspace)))
         return self.get_snapshot()
 
     def clear_runtime_overrides(self) -> ConfigSnapshot:
@@ -145,6 +145,29 @@ def config_for_workspace(workspace: Path) -> CodeMuseConfig:
     return get_config_manager(workspace).get_effective_config()
 
 
+def _merged_config_payload(
+    *,
+    environment: dict[str, Any] | None = None,
+    project: dict[str, Any] | None = None,
+    runtime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge configuration layers while deferring the provider-specific model default."""
+    payload = _default_config_payload()
+    for patch in (environment, project, runtime):
+        if patch:
+            payload = merge_patch(payload, patch)
+    return payload
+
+
+def _default_config_payload() -> dict[str, Any]:
+    """Keep the model identifier absent until the selected provider is known."""
+    payload = default_config().to_dict()
+    model = dict(payload["model"])
+    model.pop("model", None)
+    payload["model"] = model
+    return payload
+
+
 
 def _environment_config_patch() -> dict[str, Any]:
     """从 CODEMUSE_* 环境变量生成模型配置补丁。"""
@@ -153,16 +176,27 @@ def _environment_config_patch() -> dict[str, Any]:
     base_url = os.getenv("CODEMUSE_BASE_URL", "").strip()
     model_name = os.getenv("CODEMUSE_MODEL", "").strip()
     api_key_env = os.getenv("CODEMUSE_API_KEY_ENV", "").strip()
+    deepseek_api_key_present = bool(os.getenv("DEEPSEEK_API_KEY"))
+    selected_provider = provider
     if provider:
         model["provider"] = provider
     elif os.getenv("CODEMUSE_API_KEY") or base_url or model_name:
-        model["provider"] = "openai_compatible"
+        selected_provider = "openai_compatible"
+        model["provider"] = selected_provider
+    elif deepseek_api_key_present:
+        selected_provider = "deepseek"
+        model["provider"] = selected_provider
     if model_name:
         model["model"] = model_name
+    elif selected_provider == "deepseek":
+        # Avoid inheriting the fake-provider model name when DeepSeek is inferred from its key.
+        model["model"] = "deepseek-chat"
     if base_url:
         model["base_url"] = base_url
     if api_key_env:
         model["api_key_env"] = api_key_env
+    elif selected_provider == "deepseek":
+        model["api_key_env"] = "DEEPSEEK_API_KEY"
     elif os.getenv("CODEMUSE_API_KEY"):
         model["api_key_env"] = "CODEMUSE_API_KEY"
     return {"model": model} if model else {}

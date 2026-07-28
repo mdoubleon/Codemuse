@@ -72,9 +72,12 @@ class SessionHandle:
         """将 checkpoint 任务投递到当前 session 的后台队列。"""
         return self._queue_job("checkpoint", {"label": label or "manual checkpoint"})
 
-    def rewind(self, checkpoint_id: str) -> str:
+    def rewind(self, checkpoint_id: str, *, mode: str = "conversation_and_workspace") -> str:
         """将当前会话恢复到指定检查点。"""
-        return self._queue_job("rewind", {"checkpoint_id": checkpoint_id})
+        return self._queue_job("rewind", {"checkpoint_id": checkpoint_id, "mode": mode})
+
+    def preview_rewind(self, checkpoint_id: str, *, mode: str = "conversation_and_workspace") -> dict[str, Any]:
+        return self.runtime.preview_rewind(checkpoint_id, mode=mode)
 
     def cancel(self) -> dict[str, Any]:
         """请求中断正在运行的任务，并清空尚未启动的队列任务。"""
@@ -195,7 +198,7 @@ class SessionHandle:
             self.runtime.create_checkpoint(str(job.payload.get("label") or "manual checkpoint"))
             return
         if job.action == "rewind":
-            self.runtime.rewind(str(job.payload["checkpoint_id"]))
+            self.runtime.rewind(str(job.payload["checkpoint_id"]), mode=str(job.payload.get("mode") or "conversation_and_workspace"))
             return
         raise ValueError(f"Unknown session job action: {job.action}")
 
@@ -225,7 +228,14 @@ class SessionHandle:
         self._append_event(event.to_dict())
 
     def _restore_message_events(self) -> None:
-        """把持久化消息转换为前端可渲染的历史事件。"""
+        """Restore persisted conversation messages for the initial Web view.
+
+        Tool messages remain in ``runtime.state.messages`` so a restored runtime
+        retains the protocol context required for later provider requests. They
+        are deliberately not replayed as live ``tool_result`` events: those
+        events describe work completed before this handle was opened, not work
+        currently executing in the Web session.
+        """
         for message in self.runtime.state.messages:
             text = message.text_content()
             if message.role == "user" and text.strip():
@@ -252,20 +262,6 @@ class SessionHandle:
                     ).to_dict()
                 )
                 continue
-            if message.role == "tool":
-                self._append_event(
-                    AgentEvent(
-                        type="tool_result" if not message.metadata.get("is_error") else "tool_error",
-                        session_id=self.session_id,
-                        turn_id=self.runtime.state.turn_id,
-                        phase="saved",
-                        message=text,
-                        tool_name=message.tool_name,
-                        details={"restored": True, "metadata": message.metadata},
-                        is_error=bool(message.metadata.get("is_error")),
-                        timestamp=message.timestamp,
-                    ).to_dict()
-                )
 
     def _append_event(self, payload: dict[str, Any]) -> None:
         """给事件分配递增游标并保存到当前会话的内存缓存。"""

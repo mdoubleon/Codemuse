@@ -322,10 +322,24 @@
                 </div>
                 <p id="api-status" class="muted">尚未读取配置</p>
                 <form id="api-form" class="api-form">
-                  <label><span>Provider</span><select id="api-provider"></select></label>
+                  <label><span>Provider</span><select id="api-provider">
+                    <option value="fake">本地模拟</option>
+                    <option value="openai_compatible">OpenAI 兼容</option>
+                    <option value="bailian">百炼</option>
+                    <option value="deepseek">DeepSeek</option>
+                  </select></label>
                   <label><span>Model</span><input id="api-model" type="text" placeholder="例如 gpt-4.1-mini"></label>
                   <label><span>Base URL</span><input id="api-base-url" type="url" placeholder="https://api.openai.com/v1"></label>
                   <label><span>API Key 环境变量名</span><input id="api-key-env" type="text" placeholder="OPENAI_API_KEY"></label>
+                  <label><span>Temperature</span><input id="api-temperature" type="number" min="0" max="2" step="any" inputmode="decimal" placeholder="留空使用 Provider 默认值"></label>
+                  <label><span>Max tokens</span><input id="api-max-tokens" type="number" min="1" step="1" inputmode="numeric" placeholder="留空使用 Provider 默认值"></label>
+                  <div class="api-mode-control">
+                    <span class="api-field-label">运行模式</span>
+                    <div id="api-tools-enabled" class="mode-segmented" role="group" aria-label="运行模式">
+                      <button class="mode-option" type="button" data-tools-enabled="false" aria-pressed="false">Chat</button>
+                      <button class="mode-option" type="button" data-tools-enabled="true" aria-pressed="true">Agent</button>
+                    </div>
+                  </div>
                   <button class="btn btn-primary btn-block" type="submit">保存配置</button>
                 </form>
                 <details class="fold">
@@ -359,7 +373,7 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/app.js?v=20260724-session-tree"></script>
+    <script type="module" src="/app.js?v=20260728-chat-agent"></script>
     <script>
       (() => {
         const initSessionDrawer = () => {

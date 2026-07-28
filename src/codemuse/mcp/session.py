@@ -1,4 +1,4 @@
-"""实现 mock MCP client 和 MCP 会话管理，为后续真实传输预留位置。"""
+"""实现 mock、stdio 和 HTTP JSON-RPC MCP 客户端及其会话生命周期。"""
 from __future__ import annotations
 
 import json
@@ -34,10 +34,7 @@ class MCPClientProtocol(Protocol):
 
 
 class MockMCPClient:
-    """配置驱动的本地 mock MCP client。
-
-    它不是真实 MCP 传输层，只是 Stage 8 用来打通发现和适配链路的教学版。
-    """
+    """配置驱动的本地 mock MCP client，用于离线测试和演示。"""
 
     def __init__(self, server: MCPServerConfig) -> None:
         """初始化这个对象后续运行需要的具体依赖和缓存状态。"""
@@ -80,6 +77,24 @@ class MockMCPClient:
         """释放该对象持有的工作线程、会话或连接资源。"""
         return None
 
+    def list_resources(self) -> list[dict]:
+        return [{"uri": item.uri, "name": item.name, "description": item.description, "mime_type": item.mime_type} for item in self.server.resources]
+
+    def read_resource(self, uri: str) -> dict:
+        resource = next((item for item in self.server.resources if item.uri == uri), None)
+        if resource is None:
+            raise ValueError(f"Unknown MCP resource: {uri}")
+        return {"content": resource.content, "payload": {"uri": uri, "mime_type": resource.mime_type}, "is_error": False}
+
+    def list_prompts(self) -> list[dict]:
+        return [{"name": item.name, "description": item.description, "arguments_schema": item.arguments_schema} for item in self.server.prompts]
+
+    def get_prompt(self, name: str, arguments: dict) -> dict:
+        prompt = next((item for item in self.server.prompts if item.name == name), None)
+        if prompt is None:
+            raise ValueError(f"Unknown MCP prompt: {name}")
+        return {"content": _safe_format(prompt.template, arguments), "payload": {"name": name, "arguments": arguments}, "is_error": False}
+
     def _render_tool_content(self, tool: MCPToolConfig, arguments: dict) -> str:
         """根据工具配置和调用参数生成 mock MCP 工具返回文本。"""
         if tool.response_template:
@@ -112,6 +127,20 @@ class StdioMCPClient:
         result = self._request("tools/call", {"name": name, "arguments": arguments})
         content = result.get("content") if isinstance(result, dict) else result
         return {"content": _content_text(content), "payload": result, "is_error": bool(result.get("isError")) if isinstance(result, dict) else False}
+
+    def list_resources(self) -> list[dict]:
+        return list(self._request("resources/list", {}).get("resources") or [])
+
+    def read_resource(self, uri: str) -> dict:
+        result = self._request("resources/read", {"uri": uri})
+        return {"content": _content_text(result.get("contents")), "payload": result, "is_error": False}
+
+    def list_prompts(self) -> list[dict]:
+        return list(self._request("prompts/list", {}).get("prompts") or [])
+
+    def get_prompt(self, name: str, arguments: dict) -> dict:
+        result = self._request("prompts/get", {"name": name, "arguments": arguments})
+        return {"content": _content_text(result.get("messages")), "payload": result, "is_error": False}
 
     def close(self) -> None:
         if self._process.poll() is None:
@@ -171,6 +200,20 @@ class HTTPMCPClient:
         result = self._request("tools/call", {"name": name, "arguments": arguments})
         content = result.get("content") if isinstance(result, dict) else result
         return {"content": _content_text(content), "payload": result, "is_error": bool(result.get("isError")) if isinstance(result, dict) else False}
+
+    def list_resources(self) -> list[dict]:
+        return list(self._request("resources/list", {}).get("resources") or [])
+
+    def read_resource(self, uri: str) -> dict:
+        result = self._request("resources/read", {"uri": uri})
+        return {"content": _content_text(result.get("contents")), "payload": result, "is_error": False}
+
+    def list_prompts(self) -> list[dict]:
+        return list(self._request("prompts/list", {}).get("prompts") or [])
+
+    def get_prompt(self, name: str, arguments: dict) -> dict:
+        result = self._request("prompts/get", {"name": name, "arguments": arguments})
+        return {"content": _content_text(result.get("messages")), "payload": result, "is_error": False}
 
     def close(self) -> None:
         return None
@@ -233,11 +276,19 @@ class MCPSession:
         return [dict(item) for item in self.discovery_cache["tools"]]
 
 
-class MCPSessionManager:
-    """按 server 懒加载 MCP session。
+    def list_resources(self) -> list[dict]:
+        if "resources" not in self.discovery_cache:
+            self.discovery_cache["resources"] = self.client.list_resources()
+        return [dict(item) for item in self.discovery_cache["resources"]]
 
-    当前实现先支持 mock transport，后续真实 stdio/http 连接也从这里集中管理生命周期。
-    """
+    def list_prompts(self) -> list[dict]:
+        if "prompts" not in self.discovery_cache:
+            self.discovery_cache["prompts"] = self.client.list_prompts()
+        return [dict(item) for item in self.discovery_cache["prompts"]]
+
+
+class MCPSessionManager:
+    """按 server 懒加载并集中管理 mock、stdio 和 HTTP MCP session。"""
 
     def __init__(self) -> None:
         """注入该管理器需要协调的配置、注册表或存储依赖。"""

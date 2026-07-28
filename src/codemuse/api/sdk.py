@@ -1,6 +1,7 @@
 """对外提供稳定 Python API，把 CLI 和服务端操作转交给 Runtime。"""
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -8,9 +9,14 @@ from typing import Any
 from codemuse.app.bootstrap import create_capability_catalog
 from codemuse.capabilities.descriptor import CapabilityKind
 from codemuse.config.manager import get_config_manager
+from codemuse.config.patch import merge_patch
+from codemuse.config.schema import CodeMuseConfig
+from codemuse.llm.registry import get_provider_descriptor
 from codemuse.llm.registry import list_llm_providers
 from codemuse.llm.registry import provider_readiness
+from codemuse.learning.runtime import LearningRuntime
 from codemuse.memory.index_pipeline import format_memory_pipeline_search, refresh_memory_index, search_memory_pipeline
+from codemuse.mcp.manager import MCPManager
 from codemuse.runtime.events import AgentEvent
 from codemuse.runtime.runtime import AgentRuntime
 from codemuse.runtime.session_host import SessionHost
@@ -18,8 +24,11 @@ from codemuse.storage.approvals import PendingApprovalStore
 from codemuse.storage.checkpoints import CheckpointStore
 from codemuse.storage.sessions import SessionStore, build_session_tree
 from codemuse.storage.timeline import TimelineStore
+from codemuse.session.session_config import SessionConfigStore
 
 Subscriber = Callable[[AgentEvent], None]
+
+_ENVIRONMENT_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def create_runtime(
@@ -131,6 +140,7 @@ def rewind(
     checkpoint_id: str,
     *,
     session_id: str | None = None,
+    mode: str = "conversation_and_workspace",
     collect_events: bool = False,
     subscriber: Subscriber | None = None,
     subscribers: list[Subscriber] | None = None,
@@ -139,8 +149,22 @@ def rewind(
     workspace = workspace.resolve()
     target_session_id = session_id or _checkpoint_store(workspace).load(checkpoint_id).session_id
     runtime = create_runtime(workspace, session_id=target_session_id, subscriber=subscriber, subscribers=subscribers)
-    events = runtime.rewind(checkpoint_id)
+    events = runtime.rewind(checkpoint_id, mode=mode)
     return _result_payload(runtime, events, collect_events=collect_events)
+
+
+def preview_rewind(
+    workspace: Path,
+    checkpoint_id: str,
+    *,
+    session_id: str | None = None,
+    mode: str = "conversation_and_workspace",
+) -> dict[str, Any]:
+    """Return rewind effects and warnings without mutating any state."""
+    workspace = workspace.resolve()
+    target_session_id = session_id or _checkpoint_store(workspace).load(checkpoint_id).session_id
+    runtime = create_runtime(workspace, session_id=target_session_id)
+    return runtime.preview_rewind(checkpoint_id, mode=mode)
 
 
 def list_sessions(workspace: Path) -> list[dict[str, Any]]:
@@ -204,6 +228,44 @@ def list_provider_readiness(workspace: Path) -> list[dict[str, object]]:
     return provider_readiness(config)
 
 
+def configure_model_provider(
+    workspace: Path,
+    provider: str,
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key_env: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> dict[str, Any]:
+    """Select a provider and persist its complete model configuration atomically.
+
+    ``api_key_env`` is the *name* of an environment variable.  API key values are
+    deliberately not accepted or written to the project configuration.
+    """
+
+    provider_name = _required_provider_name(provider)
+    descriptor = get_provider_descriptor(provider_name)
+    model_config = {
+        "provider": descriptor.name,
+        "model": _resolved_model_text(model, descriptor.default_model, "model"),
+        "base_url": _resolved_model_text(base_url, descriptor.default_base_url, "base_url"),
+        "api_key_env": _resolved_api_key_env(api_key_env, descriptor.default_api_key_env),
+        # Null values are intentional JSON Merge Patch deletions.  They remove
+        # limits from the previous provider so a provider change cannot inherit
+        # stale generation settings.
+        "temperature": _resolved_generation_option(
+            temperature,
+            getattr(descriptor, "default_temperature", None),
+        ),
+        "max_tokens": _resolved_generation_option(
+            max_tokens,
+            getattr(descriptor, "default_max_tokens", None),
+        ),
+    }
+    return get_config_manager(workspace.resolve()).patch_project_config({"model": model_config}).to_dict()
+
+
 def refresh_memory(workspace: Path, *, max_files: int = 300) -> dict[str, Any]:
     """为 workspace 构建或刷新本地 memory/RAG 索引。"""
     return refresh_memory_index(workspace.resolve(), max_files=max_files).to_dict()
@@ -217,14 +279,114 @@ def search_memory(workspace: Path, query: str, *, limit: int = 6) -> dict[str, A
     return payload
 
 
+def list_mcp_resources(workspace: Path) -> list[dict[str, Any]]:
+    """Discover resources exposed by configured MCP servers."""
+    return [item.to_dict() for item in MCPManager.from_workspace(workspace).discover_resources()]
+
+
+def read_mcp_resource(workspace: Path, server_name: str, uri: str) -> dict[str, Any]:
+    """Read one configured MCP resource."""
+    return MCPManager.from_workspace(workspace).read_resource(server_name, uri).__dict__
+
+
+def list_mcp_prompts(workspace: Path) -> list[dict[str, Any]]:
+    """Discover prompts exposed by configured MCP servers."""
+    return [item.to_dict() for item in MCPManager.from_workspace(workspace).discover_prompts()]
+
+
+def get_mcp_prompt(workspace: Path, server_name: str, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Materialize one MCP prompt using explicit arguments."""
+    return MCPManager.from_workspace(workspace).get_prompt(server_name, name, arguments).__dict__
+
+
+def list_learning_candidates(workspace: Path, *, status: str | None = None) -> list[dict[str, Any]]:
+    """List reviewable durable-learning suggestions."""
+    return [item.to_dict() for item in LearningRuntime(workspace).store.list(status=status)]
+
+
+def approve_learning_candidate(workspace: Path, candidate_id: str) -> dict[str, Any]:
+    """Promote one reviewed candidate into project memory."""
+    return LearningRuntime(workspace).approve(candidate_id).to_dict()
+
+
+def reject_learning_candidate(workspace: Path, candidate_id: str) -> dict[str, Any]:
+    """Reject a learning candidate without changing project memory."""
+    return LearningRuntime(workspace).reject(candidate_id).to_dict()
+
+
 def set_config_path(workspace: Path, path: str, value: Any) -> dict[str, Any]:
     """通过 ConfigManager 把点路径配置写入项目配置，并返回新快照。"""
     return get_config_manager(workspace.resolve()).set_path(path, value).to_dict()
 
 
+def patch_config(workspace: Path, patch: dict[str, Any]) -> dict[str, Any]:
+    """Merge a validated object into the project configuration."""
+    return get_config_manager(workspace.resolve()).patch_project_config(patch).to_dict()
+
+
 def set_runtime_config_path(workspace: Path, path: str, value: Any) -> dict[str, Any]:
     """把点路径配置写入进程内 runtime override，不落盘到项目配置。"""
     return get_config_manager(workspace.resolve()).set_runtime_override(path, value).to_dict()
+
+
+def clear_runtime_config(workspace: Path) -> dict[str, Any]:
+    """Clear process-local configuration overrides for a workspace."""
+    return get_config_manager(workspace.resolve()).clear_runtime_overrides().to_dict()
+
+
+def get_session_config(workspace: Path, session_id: str) -> dict[str, Any]:
+    """Read persisted overrides for one session."""
+    return SessionConfigStore(workspace).load(session_id)
+
+
+def set_session_config_path(workspace: Path, session_id: str, path: str, value: Any) -> dict[str, Any]:
+    """Validate and persist one session-scoped configuration path."""
+    store = SessionConfigStore(workspace)
+    previous = store.load(session_id)
+    updated = store.set_path(session_id, path, value)
+    config_patch = store.config_patch(session_id)
+    try:
+        CodeMuseConfig.from_dict(merge_patch(get_config_manager(workspace).get_effective_config().to_dict(), config_patch))
+    except Exception:
+        store.save(session_id, previous)
+        raise
+    return updated
+
+
+def clear_session_config(workspace: Path, session_id: str) -> dict[str, Any]:
+    """Remove all persisted overrides for one session."""
+    SessionConfigStore(workspace).clear(session_id)
+    return {}
+
+
+def _required_provider_name(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("provider must be a string.")
+    name = value.strip().lower()
+    if not name:
+        raise ValueError("provider is required.")
+    return name
+
+
+def _resolved_model_text(value: str | None, default: str, field: str) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string.")
+    return value.strip() or default
+
+
+def _resolved_api_key_env(value: str | None, default: str) -> str:
+    selected = _resolved_model_text(value, default, "api_key_env")
+    if selected and not _ENVIRONMENT_VARIABLE_NAME.fullmatch(selected):
+        raise ValueError(
+            "api_key_env must be an environment variable name; do not provide a raw API key."
+        )
+    return selected
+
+
+def _resolved_generation_option(value: float | int | None, default: float | int | None) -> float | int | None:
+    return default if value is None else value
 
 
 def _merge_subscribers(

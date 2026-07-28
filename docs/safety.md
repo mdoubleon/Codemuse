@@ -1,44 +1,28 @@
 # CodeMuse Safety Boundaries
 
-CodeMuse 默认把安全边界放在工具执行层，而不是只依赖模型“自觉”。
+CodeMuse 把安全边界放在工具执行层，而不是依赖模型自行判断。
 
-## 当前已实现
-
-```text
-workspace path containment      文件工具限制在 workspace 内
-approval-required writes        write_file / replace_text / apply_patch 需要审批
-effect preview                  写入前生成 diff / effect preview
-stale guard                     审批前后摘要不一致时阻止落盘
-tool batch integrity            同批工具全部批准或拒绝后才继续请求模型
-checkpoint before writes        高风险写入前创建 checkpoint
-workspace safe rewind           checkpoint 可恢复 workspace 文件
-shell safety policy             高风险 shell 命令会被 block/stale
-guarded web fetch               私有地址和本地地址会被阻止
-safe GitHub import MVP          prepare_repo_import 生成计划；明确批准后才执行本地 clone/import
-subagent allowlist              subagent 只能使用受控工具集合
-doctor strict gate              发布前可运行 compile/test/web/eval gate
-```
-
-## 当前不会做的事
+## 已实现
 
 ```text
-不会静默写文件
-不会在 GitHub import MVP 中真实 clone
-不会执行 fetched 网页 JavaScript
-不会让 subagent 递归创建 subagent
-不会让 blocked shell 命令在 approve 后继续执行
-不会把 strict release gate 的 warning 当作完整通过
+workspace containment     文件路径必须位于 workspace 内。
+approval-required effects 写文件、shell、网络和 artifact 应用先进入审批。
+effect preview/digest     审批前展示 diff、命令或 URL 风险，并保存稳定摘要。
+stale guard               参数、文件或网络目标变化后拒绝旧审批。
+checkpoint before effects 高风险动作执行前创建 checkpoint。
+safe rewind               支持 conversation_only、workspace_only 和组合恢复及预览。
+shell policy              危险命令直接 block，允许命令仍需审批。
+network policy            HTTP/HTTPS 白名单、DNS/IP 检查、私有地址阻断和大小/跳转限制。
+static browser            不执行 JavaScript，不使用 cookie、profile 或认证状态。
+subagent isolation        只读 allowlist；写入仅在 Git worktree，产物回主目录必须再次审批。
+learning review           敏感文本和临时日志过滤，候选默认不自动写项目记忆。
+extension boundary        只安装声明式 hook/tool，不执行任意 Python entrypoint。
 ```
 
-## 高风险能力的完成要求
+## 明确不会静默执行
 
-后续补真实 clone、live provider、动态 extension entrypoint 时，必须满足：
+CodeMuse 不会静默写文件、自动应用 SubAgent patch、执行网页 JavaScript、访问私有网络、让 SubAgent 递归创建 SubAgent，也不会因为用户批准而绕过 stale/digest 校验。被拒绝的 patch artifact 会标记为 rejected 并清理隔离 worktree。
 
-```text
-有 effect preview
-有 allow / ask / deny policy
-有 approval 或显式配置开关
-有审计事件
-有 unit 或 baseline case
-有 doctor/readiness 检查
-```
+## 新高风险能力要求
+
+真实浏览器/CDP、扩展 Python entrypoint、远程认证或更强自治编排如果以后接入，必须增加 effect preview、allow/ask/deny policy、显式审批或配置开关、审计事件、单元/基线测试和 doctor 检查。

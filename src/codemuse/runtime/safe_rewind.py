@@ -13,6 +13,7 @@ class SafeRewindPreview:
     """描述一次 workspace 回退会影响哪些文件。"""
 
     checkpoint_id: str
+    mode: str = "conversation_and_workspace"
     restore_preview: dict[str, Any] = field(default_factory=dict)
     warning_messages: list[str] = field(default_factory=list)
 
@@ -24,14 +25,17 @@ class SafeRewindOrchestrator:
         """保存 workspace 和 checkpoint 存储根目录。"""
         self.snapshot_manager = WorkspaceSnapshotManager(workspace, checkpoint_root)
 
-    def preview_rewind(self, checkpoint_id: str) -> SafeRewindPreview:
+    def preview_rewind(self, checkpoint_id: str, *, mode: str = "conversation_and_workspace") -> SafeRewindPreview:
         """生成 workspace 回退预览，不修改文件。"""
-        preview = self.snapshot_manager.preview_restore(checkpoint_id)
+        if mode not in {"conversation_only", "workspace_only", "conversation_and_workspace"}:
+            raise ValueError(f"Unsupported rewind mode: {mode}")
+        preview = self.snapshot_manager.preview_restore(checkpoint_id) if mode != "conversation_only" else {}
         warnings: list[str] = []
         if preview.get("will_remove_count", 0):
             warnings.append("Current workspace has files that will be removed by rewind.")
         return SafeRewindPreview(
             checkpoint_id=checkpoint_id,
+            mode=mode,
             restore_preview=preview,
             warning_messages=warnings,
         )

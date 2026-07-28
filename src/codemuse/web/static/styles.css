@@ -1257,6 +1257,54 @@ kbd {
   text-transform: uppercase;
 }
 
+.api-mode-control {
+  display: grid;
+  gap: 4px;
+}
+
+.api-field-label {
+  color: var(--soft);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.mode-segmented {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.mode-option {
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mode-option:hover { color: var(--text); }
+
+.mode-option.active {
+  background: #fff;
+  box-shadow: var(--shadow-xs);
+  color: var(--brand);
+}
+
+.mode-option:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
 .summary-line {
   margin-top: 4px;
   display: grid;

@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 
 from codemuse.api import sdk
 from codemuse.app.bootstrap import create_capability_catalog
+from codemuse.domain.messages import ChatMessage
 
 
 class CapabilityCatalogTests(unittest.TestCase):
@@ -30,6 +31,7 @@ class CapabilityCatalogTests(unittest.TestCase):
             self.assertIn("list_files", names)
             self.assertIn("run_shell", names)
             self.assertIn("web_fetch", names)
+            self.assertIn("web_search", names)
             self.assertIn("spawn_subagent", names)
             self.assertIn("run_skill", names)
             self.assertIn("run_extension", names)
@@ -37,6 +39,7 @@ class CapabilityCatalogTests(unittest.TestCase):
             self.assertEqual(catalog.get("builtin_tool", "run_shell").metadata["permission_domain"], "shell")
             self.assertTrue(catalog.get("builtin_tool", "run_shell").metadata["requires_confirmation"])
             self.assertEqual(catalog.get("web_tool", "web_fetch").metadata["permission_domain"], "network")
+            self.assertEqual(catalog.get("web_tool", "web_search").metadata["permission_domain"], "network")
             self.assertTrue(catalog.get("web_tool", "web_fetch").metadata["requires_confirmation"])
             self.assertEqual(catalog.get("repo_tool", "prepare_repo_import").metadata["permission_domain"], "read")
             self.assertEqual(catalog.get("repo_tool", "build_project_plan").metadata["category"], "repo")
@@ -80,6 +83,7 @@ class CapabilityCatalogTests(unittest.TestCase):
             names = {item["name"] for item in capabilities}
 
             self.assertNotIn("web_fetch", names)
+            self.assertNotIn("web_search", names)
 
     def test_catalog_includes_workspace_skills_and_extensions(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -164,6 +168,23 @@ class CapabilityCatalogTests(unittest.TestCase):
 
             self.assertNotIn(("skill", "experiment-report"), keys)
             self.assertNotIn(("extension", "project-extension"), keys)
+
+    def test_skill_auto_match_and_manifest_extension_context_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            _write_skill(root)
+            _write_extension(root)
+            extension_path = root / "extensions" / "project-extension" / "EXTENSION.json"
+            payload = json.loads(extension_path.read_text(encoding="utf-8"))
+            payload["hooks"] = {"context_template": "extension context from {name}"}
+            extension_path.write_text(json.dumps(payload), encoding="utf-8")
+            agent = sdk.create_runtime(root)
+            agent.state.messages.append(ChatMessage.text("user", "build an experiment report from results"))
+            messages = agent._messages_for_model()
+            text = "\n".join(item.text_content() for item in messages if item.role == "system")
+            self.assertIn("[Skill: experiment-report]", text)
+            self.assertIn("extension context from project-extension", text)
 
 
 def _write_sample_repo(root: Path) -> None:

@@ -34,6 +34,26 @@ from codemuse.tools.registry import ToolRegistry
 
 Subscriber = Callable[[AgentEvent], None]
 
+_TOOL_LIMIT_FINAL_SUMMARY_INSTRUCTION = (
+    "The tool-use limit for this task has been reached. Based only on the "
+    "conversation and tool results already available, provide the best final "
+    "answer to the user now. Do not request, call, or suggest any additional "
+    "tools. If the available results are insufficient, state the limitation "
+    "clearly and explain what remains unknown."
+)
+_TOOL_LIMIT_FINAL_FALLBACK = (
+    "The tool-use limit has been reached, so I cannot run more tools. "
+    "I can only answer from the results already available."
+)
+_TOOLS_DISABLED_INSTRUCTION = (
+    "Tools are disabled for this chat. Answer directly from the conversation "
+    "and any results already available. Do not request, call, or suggest tools."
+)
+_TOOLS_DISABLED_FALLBACK = (
+    "Tools are disabled for this chat, so I did not execute the requested tool calls. "
+    "Enable tools to perform workspace, shell, web, or other tool actions."
+)
+
 
 class AgentRuntime:
     """控制 Agent ReAct 主循环，负责模型调用、工具调度、审批和状态保存。"""
@@ -51,7 +71,10 @@ class AgentRuntime:
         timeline_store: TimelineStore | None = None,
         policy_evaluator: ToolPolicyEvaluator | None = None,
         max_turns: int = 15,
+        max_tool_calls_per_turn: int = 4,
+        max_tool_calls_per_prompt: int = 8,
         history_token_budget: int = 16000,
+        tools_enabled: bool = True,
         hooks: RuntimeHooks | None = None,
         emitter: LifecycleEmitter | None = None,
         turn_controller: TurnController | None = None,
@@ -69,7 +92,20 @@ class AgentRuntime:
         self.timeline_store = timeline_store
         self.policy_evaluator = policy_evaluator or ToolPolicyEvaluator()
         self.max_turns = max_turns
+        if isinstance(max_tool_calls_per_turn, bool) or not isinstance(max_tool_calls_per_turn, int):
+            raise ValueError("max_tool_calls_per_turn must be an integer.")
+        if max_tool_calls_per_turn < 1:
+            raise ValueError("max_tool_calls_per_turn must be at least 1.")
+        self.max_tool_calls_per_turn = max_tool_calls_per_turn
+        if isinstance(max_tool_calls_per_prompt, bool) or not isinstance(max_tool_calls_per_prompt, int):
+            raise ValueError("max_tool_calls_per_prompt must be an integer.")
+        if max_tool_calls_per_prompt < 1:
+            raise ValueError("max_tool_calls_per_prompt must be at least 1.")
+        self.max_tool_calls_per_prompt = max_tool_calls_per_prompt
         self.history_token_budget = history_token_budget
+        if not isinstance(tools_enabled, bool):
+            raise ValueError("tools_enabled must be a boolean.")
+        self.tools_enabled = tools_enabled
         self.emitter = emitter or LifecycleEmitter()
         self.hooks = hooks or RuntimeHooks()
         self.turn_controller = turn_controller or TurnController()
@@ -79,8 +115,11 @@ class AgentRuntime:
         self.state = AgentState(session_id=session.session_id, system_prompt=session.system_prompt, messages=session.messages, queued_messages=list(session.queued_messages))
         self._subscribers: list[Subscriber] = []
         self._cancel_event = threading.Event()
+        self._owns_cancellation_token = cancellation_token is None
         self.cancellation_token = cancellation_token or CancellationToken()
         self._active_turn_node_id: str | None = None
+        self._prompt_tool_calls_used = 0
+        self._prompt_tool_budget_active = False
         self._restore_pending_tool_calls()
 
     @property
@@ -130,6 +169,8 @@ class AgentRuntime:
         """接收用户输入并驱动 Agent 执行一轮任务。"""
         if self._restore_pending_tool_calls():
             raise RuntimeError("Cannot start a new prompt while this session has pending tool approvals.")
+        self._prompt_tool_calls_used = 0
+        self._prompt_tool_budget_active = True
         self.state.messages.append(ChatMessage.text("user", text))
         if self.compactor.should_compact(self.state.messages, self._estimate_messages_tokens):
             self.compact()
@@ -142,28 +183,51 @@ class AgentRuntime:
         self._emit_checkpoint_created(captured, record)
         return captured
 
-    def rewind(self, checkpoint_id: str) -> list[AgentEvent]:
+    def preview_rewind(self, checkpoint_id: str, *, mode: str = "conversation_and_workspace") -> dict[str, Any]:
+        """Preview a rewind without changing conversation or workspace state."""
+        if self.checkpoint_store is None:
+            raise RuntimeError("Checkpoint store is not configured.")
+        checkpoint = self.checkpoint_store.load(checkpoint_id)
+        if checkpoint.session_id != self.session_id:
+            raise ValueError(f"Checkpoint belongs to another session: {checkpoint.session_id}")
+        preview = SafeRewindOrchestrator(self.workspace, self.checkpoint_store.root).preview_rewind(checkpoint_id, mode=mode)
+        return {
+            "checkpoint_id": checkpoint_id,
+            "mode": mode,
+            "label": checkpoint.label,
+            "target_message_count": len(checkpoint.messages),
+            "target_turn_id": checkpoint.turn_id,
+            "restore_preview": preview.restore_preview,
+            "warning_messages": preview.warning_messages,
+        }
+
+    def rewind(self, checkpoint_id: str, *, mode: str = "conversation_and_workspace") -> list[AgentEvent]:
         """将当前会话恢复到指定检查点。"""
         if self.checkpoint_store is None:
             raise RuntimeError("Checkpoint store is not configured.")
         checkpoint = self.checkpoint_store.load(checkpoint_id)
         if checkpoint.session_id != self.session_id:
             raise ValueError(f"Checkpoint belongs to another session: {checkpoint.session_id}")
+        if mode not in {"conversation_only", "workspace_only", "conversation_and_workspace"}:
+            raise ValueError(f"Unsupported rewind mode: {mode}")
 
         captured: list[AgentEvent] = []
         workspace_restore: dict[str, Any] | None = None
-        if checkpoint.metadata.get("workspace_snapshot") and self.checkpoint_store is not None:
+        restore_workspace = mode in {"workspace_only", "conversation_and_workspace"}
+        restore_conversation = mode in {"conversation_only", "conversation_and_workspace"}
+        if restore_workspace and checkpoint.metadata.get("workspace_snapshot") and self.checkpoint_store is not None:
             workspace_restore = SafeRewindOrchestrator(self.workspace, self.checkpoint_store.root).rewind_workspace(checkpoint_id)
-        self.state.messages = [ChatMessage.from_dict(message.to_dict()) for message in checkpoint.messages]
-        self.state.pending_tool_calls = []
-        self.state.pending_plan_token = None
-        self.state.queued_messages = []
-        self.state.memory_context = {}
-        self.state.turn_id = checkpoint.turn_id
-        self.state.phase = "idle"
-        self.state.is_running = False
-        self.state.error_message = None
-        self._persist()
+        if restore_conversation:
+            self.state.messages = [ChatMessage.from_dict(message.to_dict()) for message in checkpoint.messages]
+            self.state.pending_tool_calls = []
+            self.state.pending_plan_token = None
+            self.state.queued_messages = []
+            self.state.memory_context = {}
+            self.state.turn_id = checkpoint.turn_id
+            self.state.phase = "idle"
+            self.state.is_running = False
+            self.state.error_message = None
+            self._persist()
         self._emit(
             "checkpoint_rewound",
             captured,
@@ -171,7 +235,9 @@ class AgentRuntime:
             details={
                 "checkpoint_id": checkpoint.checkpoint_id,
                 "label": checkpoint.label,
+                "mode": mode,
                 "message_count": len(checkpoint.messages),
+                "restored_conversation": restore_conversation,
                 "restored_workspace": bool(workspace_restore),
                 "workspace_restore": workspace_restore,
             },
@@ -190,6 +256,8 @@ class AgentRuntime:
 
         call = ToolCall(id=approval.tool_call_id, name=approval.tool_name, arguments=approval.arguments)
         captured: list[AgentEvent] = []
+        if not self.tools_enabled:
+            return self._block_approved_tool_when_disabled(approval_id, call, captured)
         digest_validation = validate_effect_digest(approval.tool_name, approval.arguments, approval.details)
         if not digest_validation["ok"]:
             self._mark_invalid_approval(approval_id, call, digest_validation, captured)
@@ -234,6 +302,12 @@ class AgentRuntime:
 
         captured: list[AgentEvent] = []
         self.approval_store.mark(approval_id, "rejected")
+        if approval.tool_name == "apply_patch_artifact":
+            from codemuse.subagents.worktree import WorktreeManager
+            artifact_manager = WorktreeManager(self.workspace)
+            artifact = artifact_manager.load_artifact(str(approval.arguments.get("artifact_id") or ""))
+            artifact_manager.update_status(artifact, "rejected")
+            artifact_manager.cleanup(artifact)
         # 拒绝也要写回 tool 消息，让模型知道这次工具调用没有被执行。
         self.state.messages.append(
             ChatMessage(
@@ -249,67 +323,110 @@ class AgentRuntime:
         self._emit("approval_rejected", captured, tool_name=approval.tool_name, message=f"Rejected: {approval_id}", is_error=True)
         return self._continue_after_approval_resolution(captured)
 
+    def _block_approved_tool_when_disabled(
+        self,
+        approval_id: str,
+        call: ToolCall,
+        captured: list[AgentEvent],
+    ) -> list[AgentEvent]:
+        """Reject a previously staged tool call when this chat has since disabled tools."""
+        if self.approval_store is None:
+            raise RuntimeError("Approval store is not configured.")
+        message = f"Tool execution is disabled for this chat; {call.name} was not run."
+        self.approval_store.mark(approval_id, "rejected", details_update={"blocked_reason": "tools_disabled"})
+        self._append_tool_error(call, message)
+        self.state.pending_tool_calls = [item for item in self.state.pending_tool_calls if item.id != call.id]
+        self._persist()
+        self._emit(
+            "tool_error",
+            captured,
+            tool_name=call.name,
+            message=message,
+            details={"reason": "tools_disabled", "approval_id": approval_id},
+            is_error=True,
+        )
+        self._emit(
+            "approval_rejected",
+            captured,
+            tool_name=call.name,
+            message=f"Rejected because tools are disabled: {approval_id}",
+            details={"reason": "tools_disabled", "approval_id": approval_id},
+            is_error=True,
+        )
+        return self._continue_after_approval_resolution(captured)
+
     def _run_loop(self) -> list[AgentEvent]:
         """执行 ReAct 主循环：调用模型、处理工具调用、审批暂停和最终收尾。"""
         captured: list[AgentEvent] = []
         self._cancel_event.clear()
-        self.cancellation_token.reset()
+        if self._owns_cancellation_token:
+            self.cancellation_token.reset()
         self.state.is_running = True
         self._emit("agent_start", captured, message="Agent started.")
         keep_running = True
-        turns = 0
+        tool_turns = 0
+        if not self._prompt_tool_budget_active:
+            self._prompt_tool_budget_active = True
+            self._prompt_tool_calls_used = 0
+        tool_calls_used = self._prompt_tool_calls_used
         cancelled = False
         try:
-            while keep_running and turns < self.max_turns:
+            while keep_running:
                 if self.is_cancel_requested():
                     cancelled = True
+                    break
+                if tool_turns >= self.max_turns or (
+                    self.tools_enabled and tool_calls_used >= self.max_tool_calls_per_prompt
+                ):
+                    self._run_tool_limit_final_summary(captured)
                     break
                 if self.state.queued_messages:
                     queued = self.state.queued_messages.pop(0)
                     self.state.messages.append(ChatMessage.text("user", queued.text))
                     self._emit("queue_dequeued", captured, message=queued.text, details={"delivery": queued.delivery, "queue_size": len(self.state.queued_messages)})
-                turns += 1
                 self.state.turn_id += 1
                 self._begin_turn_node()
                 turn_start = self.turn_controller.on_turn_start(self.state)
                 self.state.phase = turn_start.phase or "planning"
                 self._emit("turn_start", captured, details={"turn_id": self.state.turn_id})
                 model_messages = self._messages_for_model()
+                available_tools = self.tool_registry.specs() if self.tools_enabled else []
                 request_event = AgentEvent(type="before_provider_request", session_id=self.session_id, turn_id=self.state.turn_id, phase=self.state.phase)
-                request = self.emitter.emit_before_provider_request(request_event, self.state, model_messages, self.tool_registry.specs())
-                request_messages = request.messages if request.messages is not None else model_messages
-                request_tools = request.tools if request.tools is not None else self.tool_registry.specs()
-                self._emit("before_provider_request", captured, details={"message_count": len(request_messages), "tool_count": len(request_tools)})
-                text_parts: list[str] = []
-                streamed_tool_calls: list[ToolCall] = []
-                streamed_usage: dict[str, int] = {}
-                streamed_metadata: dict[str, Any] = {}
-                for chunk in iter_provider_stream(self.llm, request_messages, request_tools):
-                    if chunk.text:
-                        text_parts.append(chunk.text)
-                        self._emit("message_delta", captured, delta=chunk.text)
-                    if chunk.tool_calls:
-                        streamed_tool_calls.extend(chunk.tool_calls)
-                    if chunk.usage:
-                        streamed_usage.update(chunk.usage)
-                    if chunk.provider_metadata:
-                        streamed_metadata.update(chunk.provider_metadata)
-                response = LLMResponse(
-                    text="".join(text_parts),
-                    tool_calls=streamed_tool_calls,
-                    usage=streamed_usage,
-                    provider_metadata=streamed_metadata,
+                request = self.emitter.emit_before_provider_request(request_event, self.state, model_messages, available_tools)
+                request_messages = list(request.messages if request.messages is not None else model_messages)
+                if not self.tools_enabled:
+                    request_messages.append(ChatMessage.text("system", _TOOLS_DISABLED_INSTRUCTION))
+                # A disabled chat never sends tools, even if a lifecycle hook tries to add them.
+                request_tools = (request.tools if request.tools is not None else available_tools) if self.tools_enabled else []
+                self._emit(
+                    "before_provider_request",
+                    captured,
+                    details={"message_count": len(request_messages), "tool_count": len(request_tools), "tools_enabled": self.tools_enabled},
                 )
+                response = self._collect_provider_response(request_messages, request_tools, captured)
                 response_event = AgentEvent(type="provider_response", session_id=self.session_id, turn_id=self.state.turn_id, phase=self.state.phase)
                 response_decision = self.emitter.emit_provider_response(response_event, response.text, response.tool_calls)
                 if response_decision.assistant_text is not None:
                     response.text = response_decision.assistant_text
                 if response_decision.tool_calls is not None:
                     response.tool_calls = response_decision.tool_calls
+                if self.tools_enabled:
+                    response.tool_calls = self._limit_response_tool_calls(
+                        response.tool_calls,
+                        captured,
+                        prompt_tool_calls_used=tool_calls_used,
+                    )
+                    tool_calls_used += len(response.tool_calls)
+                    self._prompt_tool_calls_used = tool_calls_used
                 if response.text:
                     self.state.messages.append(ChatMessage.text("assistant", response.text))
                     self._emit("message", captured, message=response.text)
                 if response.tool_calls:
+                    if not self.tools_enabled:
+                        self._record_disabled_tool_calls(response.tool_calls, captured)
+                        keep_running = False
+                        self._emit("turn_end", captured, details={"turn_id": self.state.turn_id, "tools_enabled": False})
+                        continue
                     assistant_message = ChatMessage(role="assistant", tool_calls=response.tool_calls)
                     self.state.messages.append(assistant_message)
                     self.state.phase = "executing"
@@ -373,6 +490,7 @@ class AgentRuntime:
                         keep_running = False
                         self._emit("turn_end", captured, details={"turn_id": self.state.turn_id, "phase": "awaiting_approval"})
                         continue
+                    tool_turns += 1
                     next_message = self.state.queued_messages[0] if self.state.queued_messages else None
                     round_decision = self.turn_controller.after_tool_round(
                         tool_failed=tool_failed,
@@ -390,6 +508,7 @@ class AgentRuntime:
             self._finish_turn_node("cancelled" if cancelled else ("awaiting_approval" if self.state.phase == "awaiting_approval" else "completed"))
             if cancelled:
                 self.state.phase = "cancelled"
+                self._reset_prompt_tool_budget()
                 self._emit(
                     "agent_cancelled",
                     captured,
@@ -400,12 +519,224 @@ class AgentRuntime:
                 self.state.phase = "awaiting_approval"
             else:
                 self.state.phase = "idle"
+                self._reset_prompt_tool_budget()
             self.state.is_running = False
             self._cancel_event.clear()
-            self.cancellation_token.reset()
+            if self._owns_cancellation_token:
+                self.cancellation_token.reset()
             self._persist()
             self._emit("agent_end", captured, message="Agent ended.")
         return captured
+
+    def _record_disabled_tool_calls(self, calls: list[ToolCall], captured: list[AgentEvent]) -> None:
+        """Surface ignored provider tool calls without adding an invalid tool-call history entry."""
+        blocked_calls = [call.to_dict() for call in calls]
+        blocked_names = ", ".join(sorted({call.name for call in calls}))
+        message = f"{_TOOLS_DISABLED_FALLBACK} Ignored requested tools: {blocked_names}."
+        self.state.messages.append(ChatMessage.text("assistant", message))
+        self._emit(
+            "tool_error",
+            captured,
+            tool_name=calls[0].name,
+            message=message,
+            details={"reason": "tools_disabled", "blocked_tool_calls": blocked_calls},
+            is_error=True,
+        )
+        self._emit("message", captured, message=message, details={"tools_enabled": False}, is_error=True)
+
+    def _limit_response_tool_calls(
+        self,
+        calls: list[ToolCall],
+        captured: list[AgentEvent],
+        *,
+        prompt_tool_calls_used: int,
+    ) -> list[ToolCall]:
+        """Keep one useful batch from a provider response without overriding tool choice."""
+        if not calls:
+            return []
+
+        accepted: list[ToolCall] = []
+        duplicate_calls: list[ToolCall] = []
+        turn_overflow_calls: list[ToolCall] = []
+        prompt_overflow_calls: list[ToolCall] = []
+        seen: set[tuple[str, str]] = set()
+        prompt_remaining = max(0, self.max_tool_calls_per_prompt - prompt_tool_calls_used)
+        for call in calls:
+            signature = self._tool_call_signature(call)
+            if signature in seen:
+                duplicate_calls.append(call)
+                continue
+            seen.add(signature)
+            if len(accepted) >= self.max_tool_calls_per_turn:
+                turn_overflow_calls.append(call)
+                continue
+            if len(accepted) >= prompt_remaining:
+                prompt_overflow_calls.append(call)
+                continue
+            accepted.append(call)
+
+        if duplicate_calls or turn_overflow_calls or prompt_overflow_calls:
+            suppressed = [*duplicate_calls, *turn_overflow_calls, *prompt_overflow_calls]
+            self._emit(
+                "tool_calls_limited",
+                captured,
+                message=(
+                    "Limited this model response to "
+                    f"{len(accepted)} distinct tool call(s); skipped {len(suppressed)} redundant or excess call(s)."
+                ),
+                details={
+                    "requested_count": len(calls),
+                    "accepted_count": len(accepted),
+                    "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
+                    "max_tool_calls_per_prompt": self.max_tool_calls_per_prompt,
+                    "prompt_tool_calls_used": prompt_tool_calls_used,
+                    "prompt_tool_calls_remaining": prompt_remaining,
+                    "duplicate_count": len(duplicate_calls),
+                    "overflow_count": len(turn_overflow_calls) + len(prompt_overflow_calls),
+                    "turn_overflow_count": len(turn_overflow_calls),
+                    "prompt_budget_overflow_count": len(prompt_overflow_calls),
+                    "suppressed_tool_calls": [call.to_dict() for call in suppressed],
+                },
+            )
+        return accepted
+
+    def _reset_prompt_tool_budget(self) -> None:
+        self._prompt_tool_calls_used = 0
+        self._prompt_tool_budget_active = False
+
+    @staticmethod
+    def _tool_call_signature(call: ToolCall) -> tuple[str, str]:
+        """Use stable JSON so equivalent argument objects deduplicate reliably."""
+        try:
+            arguments = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            arguments = repr(call.arguments)
+        return call.name, arguments
+
+    def _run_tool_limit_final_summary(self, captured: list[AgentEvent]) -> None:
+        """Request one final answer after the allowed tool-driven turns are exhausted."""
+        self.state.turn_id += 1
+        self._begin_turn_node()
+        self.state.phase = "planning"
+        self._emit(
+            "turn_start",
+            captured,
+            details={
+                "turn_id": self.state.turn_id,
+                "reason": "tool_turn_limit_final_summary",
+                "tools_disabled": True,
+            },
+        )
+
+        model_messages = self._messages_for_model()
+        request_event = AgentEvent(
+            type="before_provider_request",
+            session_id=self.session_id,
+            turn_id=self.state.turn_id,
+            phase=self.state.phase,
+        )
+        request = self.emitter.emit_before_provider_request(request_event, self.state, model_messages, [])
+        request_messages = list(request.messages if request.messages is not None else model_messages)
+        request_messages.append(ChatMessage.text("system", _TOOL_LIMIT_FINAL_SUMMARY_INSTRUCTION))
+        # This call must remain tool-free even when a lifecycle hook adds tools.
+        request_tools: list[Any] = []
+        self._emit(
+            "before_provider_request",
+            captured,
+            details={
+                "message_count": len(request_messages),
+                "tool_count": 0,
+                "forced_final_summary": True,
+            },
+        )
+
+        try:
+            response = self._collect_provider_response(request_messages, request_tools, captured)
+        except Exception as exc:  # noqa: BLE001 - preserve completed tool observations for the user
+            message = f"{_TOOL_LIMIT_FINAL_FALLBACK} The final no-tool response failed."
+            self.state.messages.append(ChatMessage.text("assistant", message))
+            self._emit(
+                "provider_error",
+                captured,
+                message=message,
+                details={"reason": "tool_turn_limit_final_summary", "error": str(exc)},
+                is_error=True,
+            )
+            self._emit("message", captured, message=message, details={"forced_final_summary": True}, is_error=True)
+            self._emit("turn_end", captured, details={"turn_id": self.state.turn_id, "forced_final_summary": True, "status": "provider_error"})
+            return
+
+        response_event = AgentEvent(
+            type="provider_response",
+            session_id=self.session_id,
+            turn_id=self.state.turn_id,
+            phase=self.state.phase,
+        )
+        response_decision = self.emitter.emit_provider_response(response_event, response.text, response.tool_calls)
+        if response_decision.assistant_text is not None:
+            response.text = response_decision.assistant_text
+        if response_decision.tool_calls is not None:
+            response.tool_calls = response_decision.tool_calls
+
+        if response.text:
+            self.state.messages.append(ChatMessage.text("assistant", response.text))
+            self._emit("message", captured, message=response.text, details={"forced_final_summary": True})
+
+        if response.tool_calls:
+            blocked_calls = [call.to_dict() for call in response.tool_calls]
+            blocked_names = ", ".join(sorted({call.name for call in response.tool_calls}))
+            message = (
+                f"{_TOOL_LIMIT_FINAL_FALLBACK} I did not execute the additional requested tool calls: "
+                f"{blocked_names}."
+            )
+            self.state.messages.append(ChatMessage.text("assistant", message))
+            self._emit(
+                "tool_error",
+                captured,
+                tool_name=response.tool_calls[0].name,
+                message=message,
+                details={
+                    "reason": "tool_turn_limit",
+                    "blocked_tool_calls": blocked_calls,
+                    "forced_final_summary": True,
+                },
+                is_error=True,
+            )
+            self._emit("message", captured, message=message, details={"forced_final_summary": True}, is_error=True)
+        elif not response.text.strip():
+            message = f"{_TOOL_LIMIT_FINAL_FALLBACK} The model did not provide a final answer."
+            self.state.messages.append(ChatMessage.text("assistant", message))
+            self._emit("message", captured, message=message, details={"forced_final_summary": True}, is_error=True)
+
+        self._emit("turn_end", captured, details={"turn_id": self.state.turn_id, "forced_final_summary": True})
+
+    def _collect_provider_response(
+        self,
+        messages: list[ChatMessage],
+        tools: list[Any],
+        captured: list[AgentEvent],
+    ) -> LLMResponse:
+        """Collect a streamed or complete provider result into one response object."""
+        text_parts: list[str] = []
+        streamed_tool_calls: list[ToolCall] = []
+        streamed_usage: dict[str, int] = {}
+        streamed_metadata: dict[str, Any] = {}
+        for chunk in iter_provider_stream(self.llm, messages, tools):
+            if chunk.text:
+                text_parts.append(chunk.text)
+                self._emit("message_delta", captured, delta=chunk.text)
+            if chunk.tool_calls:
+                streamed_tool_calls.extend(chunk.tool_calls)
+            if chunk.usage:
+                streamed_usage.update(chunk.usage)
+            if chunk.provider_metadata:
+                streamed_metadata.update(chunk.provider_metadata)
+        return LLMResponse(
+            text="".join(text_parts),
+            tool_calls=streamed_tool_calls,
+            usage=streamed_usage,
+            provider_metadata=streamed_metadata,
+        )
 
     def _messages_for_model(self) -> list[ChatMessage]:
         """构造发给模型的上下文，并在调用前注入相关长期记忆。"""

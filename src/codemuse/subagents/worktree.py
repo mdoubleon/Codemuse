@@ -62,7 +62,10 @@ class WorktreeManager:
         source_head = self._stdout(["rev-parse", "HEAD"])
         path = (self.root / run_id / agent).resolve()
         if path.exists():
-            shutil.rmtree(path)
+            self._assert_managed_path(path)
+            self._git(["worktree", "remove", "--force", str(path)], check=False)
+            if path.exists():
+                shutil.rmtree(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._git(["worktree", "add", "--detach", str(path), source_head])
         dirty = self._git(["diff", "--binary", "HEAD", "--"], check=False).stdout or ""
@@ -103,6 +106,36 @@ class WorktreeManager:
     def apply(self, artifact: PatchArtifact) -> bool:
         result = self._git(["apply", artifact.patch_path], check=False)
         return result.returncode == 0
+
+    def load_artifact(self, artifact_id: str) -> PatchArtifact:
+        if not artifact_id or any(part in artifact_id for part in ("/", "\\", "..")):
+            raise ValueError("Invalid patch artifact id")
+        matches = list(self.artifact_root.glob(f"*/{artifact_id}.json"))
+        if not matches:
+            raise FileNotFoundError(f"Patch artifact not found: {artifact_id}")
+        payload = json.loads(matches[0].read_text(encoding="utf-8"))
+        return PatchArtifact(**payload)
+
+    def update_status(self, artifact: PatchArtifact, status: str) -> PatchArtifact:
+        artifact.status = status
+        meta_path = Path(artifact.patch_path).with_suffix(".json")
+        meta_path.write_text(json.dumps(artifact.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return artifact
+
+    def cleanup(self, handle: WorktreeHandle | PatchArtifact) -> bool:
+        """Unregister and remove exactly one managed isolated worktree."""
+        path = Path(handle.worktree_path).resolve()
+        self._assert_managed_path(path)
+        result = self._git(["worktree", "remove", "--force", str(path)], check=False)
+        if path.exists():
+            shutil.rmtree(path)
+        self._git(["worktree", "prune"], check=False)
+        return result.returncode == 0 or not path.exists()
+
+    def _assert_managed_path(self, path: Path) -> None:
+        root = self.root.resolve()
+        if path == root or root not in path.parents:
+            raise PermissionError(f"Refusing to clean unmanaged worktree path: {path}")
 
     def _stdout(self, args: list[str], *, cwd: Path | None = None) -> str:
         return (self._git(args, cwd=cwd, check=False).stdout or "").strip()

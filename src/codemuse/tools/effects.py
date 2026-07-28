@@ -28,6 +28,22 @@ def build_tool_effect_preview(workspace: Path, tool_name: str, arguments: dict[s
             return build_shell_effect_preview(workspace, arguments)
         if tool_name == "web_fetch":
             return build_web_fetch_effect_preview(workspace, arguments)
+        if tool_name == "web_search":
+            query = str(arguments.get("query") or "").strip()
+            mode = str(arguments.get("mode") or "web")
+            return {"kind": "web_search", "available": True, "blocked": not query or mode not in {"web", "news", "github"}, "reason": "query is required" if not query else (f"Unsupported mode: {mode}" if mode not in {"web", "news", "github"} else ""), "query": query, "mode": mode, "provider": "duckduckgo", "endpoint": "https://html.duckduckgo.com/html/", "risk_level": "medium", "executed_javascript": False}
+        if tool_name == "browser_navigate":
+            action = str(arguments.get("action") or "")
+            if action == "open":
+                preview = build_web_fetch_effect_preview(workspace, {"url": arguments.get("url")})
+                return {**preview, "kind": "browser_navigate", "action": action, "new_tab": bool(arguments.get("new_tab"))}
+            return {"kind": "browser_navigate", "available": True, "blocked": action != "click", "reason": "" if action == "click" else f"Unsupported browser action: {action}", "action": action, "ref": str(arguments.get("ref") or ""), "risk_level": "medium", "executed_javascript": False}
+        if tool_name == "apply_patch_artifact":
+            from codemuse.subagents.worktree import WorktreeManager
+            artifact = WorktreeManager(workspace).load_artifact(str(arguments.get("artifact_id") or ""))
+            patch_text = Path(artifact.patch_path).read_text(encoding="utf-8")
+            preview = build_apply_patch_effect_preview(workspace, {"patch": patch_text, "create_dirs": True})
+            return {**preview, "kind": "apply_patch_artifact", "artifact_id": artifact.artifact_id, "changed_paths": artifact.changed_paths}
         return None
     except Exception as exc:  # noqa: BLE001 - 预览失败也要返回给用户看，不能悄悄吞掉
         return {
@@ -45,7 +61,7 @@ def validate_tool_effect_preview(
     stored_preview: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """批准前重新生成预览并比较文件状态，避免用户按旧 diff 批准新文件。"""
-    if tool_name not in {"write_file", "apply_patch", "replace_text", "run_shell", "web_fetch"} or not stored_preview:
+    if tool_name not in {"write_file", "apply_patch", "apply_patch_artifact", "replace_text", "run_shell", "web_fetch", "web_search", "browser_navigate"} or not stored_preview:
         return {"ok": True, "reason": "", "current_preview": None, "changed_fields": []}
     current_preview = build_tool_effect_preview(workspace, tool_name, arguments)
     if current_preview is None:
@@ -65,7 +81,7 @@ def validate_tool_effect_preview(
             "changed_fields": [],
         }
 
-    if tool_name == "apply_patch":
+    if tool_name in {"apply_patch", "apply_patch_artifact"}:
         changed_fields = _changed_patch_preview_fields(stored_preview, current_preview)
     elif tool_name == "run_shell":
         changed_fields = [
@@ -73,12 +89,14 @@ def validate_tool_effect_preview(
             for field in ["command", "working_directory", "timeout_seconds", "risk_level", "blocked", "reason"]
             if stored_preview.get(field) != current_preview.get(field)
         ]
-    elif tool_name == "web_fetch":
+    elif tool_name in {"web_fetch", "browser_navigate"}:
         changed_fields = [
             field
-            for field in ["url", "hostname", "timeout_seconds", "max_chars", "max_bytes", "risk_level", "blocked", "reason"]
+            for field in ["action", "url", "ref", "hostname", "timeout_seconds", "max_chars", "max_bytes", "risk_level", "blocked", "reason"]
             if stored_preview.get(field) != current_preview.get(field)
         ]
+    elif tool_name == "web_search":
+        changed_fields = [field for field in ["query", "mode", "provider", "endpoint", "blocked", "reason"] if stored_preview.get(field) != current_preview.get(field)]
     else:
         changed_fields = [
             field

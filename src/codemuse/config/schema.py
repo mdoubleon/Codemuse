@@ -2,7 +2,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
+import re
 from typing import Any
+
+
+_ENVIRONMENT_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_DEFAULT_MODEL_BY_PROVIDER = {
+    "fake": "fake-local",
+    "openai_compatible": "gpt-4o-mini",
+    "bailian": "qwen-plus",
+    "deepseek": "deepseek-chat",
+}
 
 
 @dataclass(frozen=True)
@@ -12,19 +23,37 @@ class ModelConfig:
     model: str = "fake-local"
     base_url: str = ""
     api_key_env: str = ""
+    temperature: float | None = None
+    max_tokens: int | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ModelConfig":
         """把字典里的字段校正并恢复成 ModelConfig 对象。"""
         provider = _string_value(payload.get("provider", "fake"), "model.provider")
-        if provider not in {"fake", "openai_compatible", "bailian"}:
+        if provider not in {"fake", "openai_compatible", "bailian", "deepseek"}:
             raise ConfigValidationError(f"model.provider is not supported: {provider}")
-        model = _string_value(payload.get("model", "fake-local"), "model.model")
+        model = _string_value(
+            payload.get("model", _DEFAULT_MODEL_BY_PROVIDER[provider]),
+            "model.model",
+        )
         if not model:
             raise ConfigValidationError("model.model cannot be empty.")
         base_url = _string_value(payload.get("base_url", ""), "model.base_url")
         api_key_env = _string_value(payload.get("api_key_env", ""), "model.api_key_env")
-        return cls(provider=provider, model=model, base_url=base_url, api_key_env=api_key_env)
+        if api_key_env and not _ENVIRONMENT_VARIABLE_NAME.fullmatch(api_key_env):
+            raise ConfigValidationError(
+                "model.api_key_env must be an environment variable name; do not provide a raw API key."
+            )
+        temperature = _optional_temperature_value(payload.get("temperature"), "model.temperature")
+        max_tokens = _optional_positive_int_value(payload.get("max_tokens"), "model.max_tokens")
+        return cls(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key_env=api_key_env,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """把 ModelConfig 转成可写入文件或 API 响应的字典。"""
@@ -33,6 +62,8 @@ class ModelConfig:
             "model": self.model,
             "base_url": self.base_url,
             "api_key_env": self.api_key_env,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
 
 
@@ -40,7 +71,10 @@ class ModelConfig:
 class RuntimeConfig:
     """RuntimeConfig：保存该能力运行需要的配置字段。"""
     max_turns: int = 8
+    max_tool_calls_per_turn: int = 4
+    max_tool_calls_per_prompt: int = 8
     history_token_budget: int = 16000
+    tools_enabled: bool = True
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "RuntimeConfig":
@@ -48,14 +82,33 @@ class RuntimeConfig:
         max_turns = int(payload.get("max_turns", 8))
         if max_turns < 1 or max_turns > 50:
             raise ConfigValidationError("runtime.max_turns must be between 1 and 50.")
+        max_tool_calls_per_turn = int(payload.get("max_tool_calls_per_turn", 4))
+        if max_tool_calls_per_turn < 1 or max_tool_calls_per_turn > 32:
+            raise ConfigValidationError("runtime.max_tool_calls_per_turn must be between 1 and 32.")
+        max_tool_calls_per_prompt = int(payload.get("max_tool_calls_per_prompt", 8))
+        if max_tool_calls_per_prompt < 1 or max_tool_calls_per_prompt > 64:
+            raise ConfigValidationError("runtime.max_tool_calls_per_prompt must be between 1 and 64.")
         history_token_budget = int(payload.get("history_token_budget", 16000))
         if history_token_budget < 256 or history_token_budget > 128000:
             raise ConfigValidationError("runtime.history_token_budget must be between 256 and 128000.")
-        return cls(max_turns=max_turns, history_token_budget=history_token_budget)
+        tools_enabled = _bool_value(payload.get("tools_enabled", True), "runtime.tools_enabled")
+        return cls(
+            max_turns=max_turns,
+            max_tool_calls_per_turn=max_tool_calls_per_turn,
+            max_tool_calls_per_prompt=max_tool_calls_per_prompt,
+            history_token_budget=history_token_budget,
+            tools_enabled=tools_enabled,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """把 RuntimeConfig 转成可写入文件或 API 响应的字典。"""
-        return {"max_turns": self.max_turns, "history_token_budget": self.history_token_budget}
+        return {
+            "max_turns": self.max_turns,
+            "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
+            "max_tool_calls_per_prompt": self.max_tool_calls_per_prompt,
+            "history_token_budget": self.history_token_budget,
+            "tools_enabled": self.tools_enabled,
+        }
 
 
 @dataclass(frozen=True)
@@ -107,8 +160,22 @@ class CodeMuseConfig:
         model_payload = _object_value(data.get("model", {}), "model")
         runtime_payload = _object_value(data.get("runtime", {}), "runtime")
         capabilities_payload = _object_value(data.get("capabilities", {}), "capabilities")
-        _reject_unknown_keys(model_payload, {"provider", "model", "base_url", "api_key_env"}, "model")
-        _reject_unknown_keys(runtime_payload, {"max_turns", "history_token_budget"}, "runtime")
+        _reject_unknown_keys(
+            model_payload,
+            {"provider", "model", "base_url", "api_key_env", "temperature", "max_tokens"},
+            "model",
+        )
+        _reject_unknown_keys(
+            runtime_payload,
+            {
+                "max_turns",
+                "max_tool_calls_per_turn",
+                "max_tool_calls_per_prompt",
+                "history_token_budget",
+                "tools_enabled",
+            },
+            "runtime",
+        )
         _reject_unknown_keys(
             capabilities_payload,
             {
@@ -175,12 +242,45 @@ def config_schema() -> dict[str, Any]:
                 "description": "Environment variable name for live providers.",
             },
             {
+                "path": "model.temperature",
+                "type": "number",
+                "default": None,
+                "nullable": True,
+                "minimum": 0,
+                "maximum": 2,
+                "description": "Optional sampling temperature for OpenAI-compatible live providers.",
+            },
+            {
+                "path": "model.max_tokens",
+                "type": "integer",
+                "default": None,
+                "nullable": True,
+                "minimum": 1,
+                "description": "Optional completion-token limit for OpenAI-compatible live providers.",
+            },
+            {
                 "path": "runtime.max_turns",
                 "type": "integer",
                 "default": 8,
                 "minimum": 1,
                 "maximum": 50,
-                "description": "Maximum ReAct loop turns per prompt.",
+                "description": "Maximum tool-driven turns per prompt before a forced final answer.",
+            },
+            {
+                "path": "runtime.max_tool_calls_per_turn",
+                "type": "integer",
+                "default": 4,
+                "minimum": 1,
+                "maximum": 32,
+                "description": "Maximum distinct tool calls executed from one model response.",
+            },
+            {
+                "path": "runtime.max_tool_calls_per_prompt",
+                "type": "integer",
+                "default": 8,
+                "minimum": 1,
+                "maximum": 64,
+                "description": "Maximum accepted tool calls across one user prompt before a forced final answer.",
             },
             {
                 "path": "runtime.history_token_budget",
@@ -189,6 +289,12 @@ def config_schema() -> dict[str, Any]:
                 "minimum": 256,
                 "maximum": 128000,
                 "description": "Approximate token budget for persisted conversation history sent to the model.",
+            },
+            {
+                "path": "runtime.tools_enabled",
+                "type": "boolean",
+                "default": True,
+                "description": "Whether this chat may expose and execute tools.",
             },
             {
                 "path": "capabilities.mcp_enabled",
@@ -253,6 +359,29 @@ def _string_value(value: Any, path: str) -> str:
     if isinstance(value, str):
         return value.strip()
     raise ConfigValidationError(f"{path} must be a string.")
+
+
+def _optional_temperature_value(value: Any, path: str) -> float | None:
+    """Validate an optional OpenAI-compatible sampling temperature."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigValidationError(f"{path} must be a number or null.")
+    result = float(value)
+    if not isfinite(result) or result < 0 or result > 2:
+        raise ConfigValidationError(f"{path} must be between 0 and 2.")
+    return result
+
+
+def _optional_positive_int_value(value: Any, path: str) -> int | None:
+    """Validate an optional positive integer model limit."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigValidationError(f"{path} must be an integer or null.")
+    if value < 1:
+        raise ConfigValidationError(f"{path} must be greater than zero.")
+    return value
 
 
 def _reject_unknown_keys(data: dict[str, Any], allowed: set[str], prefix: str) -> None:

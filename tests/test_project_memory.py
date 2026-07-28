@@ -24,6 +24,7 @@ class ProjectMemoryTests(unittest.TestCase):
     def test_default_prompt_guides_project_memory_usage(self) -> None:
         self.assertIn("save_project_memory", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("search_project_memory", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("Tool-use policy v3", DEFAULT_SYSTEM_PROMPT)
 
     def test_file_memory_store_and_search(self) -> None:
         """验证该场景下的输入、状态变化和输出是否符合预期。"""
@@ -98,6 +99,7 @@ class ProjectMemoryTests(unittest.TestCase):
 
             self.assertIn("save_project_memory", restored.state.system_prompt)
             self.assertIn("search_project_memory", restored.state.system_prompt)
+            self.assertIn("Tool-use policy v3", restored.state.system_prompt)
 
 
 if __name__ == "__main__":

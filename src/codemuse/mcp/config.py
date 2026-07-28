@@ -43,6 +43,42 @@ class MCPToolConfig:
 
 
 @dataclass
+class MCPResourceConfig:
+    uri: str
+    name: str = ""
+    description: str = ""
+    mime_type: str = "text/plain"
+    content: str = ""
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MCPResourceConfig":
+        return cls(
+            uri=str(payload["uri"]),
+            name=str(payload.get("name") or payload["uri"]),
+            description=str(payload.get("description") or ""),
+            mime_type=str(payload.get("mime_type") or payload.get("mimeType") or "text/plain"),
+            content=str(payload.get("content") or ""),
+        )
+
+
+@dataclass
+class MCPPromptConfig:
+    name: str
+    description: str = ""
+    arguments_schema: dict[str, Any] = field(default_factory=dict)
+    template: str = ""
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MCPPromptConfig":
+        return cls(
+            name=str(payload["name"]),
+            description=str(payload.get("description") or ""),
+            arguments_schema=dict(payload.get("arguments_schema") or payload.get("argumentsSchema") or {}),
+            template=str(payload.get("template") or ""),
+        )
+
+
+@dataclass
 class MCPServerConfig:
     """MCPServerConfig：保存该能力运行需要的配置字段。"""
     name: str
@@ -56,11 +92,15 @@ class MCPServerConfig:
     approval_mode: str = "default"
     timeout_seconds: int = 30
     tools: list[MCPToolConfig] = field(default_factory=list)
+    resources: list[MCPResourceConfig] = field(default_factory=list)
+    prompts: list[MCPPromptConfig] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "MCPServerConfig":
         """把字典里的字段校正并恢复成 MCPServerConfig 对象。"""
         tools = [MCPToolConfig.from_dict(item) for item in payload.get("tools", [])]
+        resources = [MCPResourceConfig.from_dict(item) for item in payload.get("resources", [])]
+        prompts = [MCPPromptConfig.from_dict(item) for item in payload.get("prompts", [])]
         return cls(
             name=str(payload["name"]),
             description=str(payload.get("description") or ""),
@@ -73,6 +113,8 @@ class MCPServerConfig:
             approval_mode=str(payload.get("approval_mode") or "default"),
             timeout_seconds=int(payload.get("timeout_seconds") or 30),
             tools=tools,
+            resources=resources,
+            prompts=prompts,
         )
 
 
@@ -84,10 +126,7 @@ class MCPConfigDocument:
 
 
 def load_mcp_config(workspace: Path, config_paths: list[Path] | None = None) -> MCPConfigDocument:
-    """读取 CodeMuse 的 MCP 配置。
-
-    当前阶段只解析配置，不启动真实外部进程。这样先学清楚 MCP 在架构中的位置。
-    """
+    """读取 MCP 配置；外部连接仍由会话管理器按需建立。"""
 
     paths = config_paths or [
         workspace / "mcp.json",

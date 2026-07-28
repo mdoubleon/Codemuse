@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from codemuse.app.bootstrap import build_agent
+from codemuse.api import sdk
 
 
 class MCPIntegrationTests(unittest.TestCase):
@@ -56,6 +57,23 @@ class MCPIntegrationTests(unittest.TestCase):
             report = status_events[0].details["mcp"]
             self.assertEqual(report["ready_count"], 1)
             self.assertEqual(report["servers"][0]["tool_count"], 1)
+
+    def test_mcp_resources_and_prompts_are_discoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_mcp_config(root, destructive=False)
+            payload = json.loads((root / "mcp.json").read_text(encoding="utf-8"))
+            payload["servers"][0]["resources"] = [{"uri": "memory://guide", "name": "Guide", "content": "project guide"}]
+            payload["servers"][0]["prompts"] = [{"name": "review", "description": "Review code", "template": "Review {path}"}]
+            (root / "mcp.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            resources = sdk.list_mcp_resources(root)
+            prompts = sdk.list_mcp_prompts(root)
+
+            self.assertEqual("memory://guide", resources[0]["uri"])
+            self.assertEqual("project guide", sdk.read_mcp_resource(root, "demo", "memory://guide")["content"])
+            self.assertEqual("review", prompts[0]["name"])
+            self.assertEqual("Review README.md", sdk.get_mcp_prompt(root, "demo", "review", {"path": "README.md"})["content"])
 
 
 def _write_mcp_config(root: Path, *, destructive: bool) -> None:

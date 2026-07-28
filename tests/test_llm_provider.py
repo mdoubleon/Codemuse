@@ -175,6 +175,113 @@ class LLMProviderTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 1)
         sleep.assert_not_called()
 
+    def test_openai_compatible_stream_retries_transient_error_before_text(self) -> None:
+        provider = OpenAICompatibleProvider(
+            model="test-model",
+            base_url="https://example.test/v1",
+            api_key_env="TEST_API_KEY",
+            max_retries=2,
+        )
+        transient = _http_error(502, b'{"error":{"message":"upstream unavailable"}}')
+        success = _FakeSSEHTTPResponse([
+            b'data: {"id":"chatcmpl-test","choices":[{"delta":{"content":"recovered"}}]}\n',
+            b'data: [DONE]\n',
+        ])
+
+        with patch.dict("os.environ", {"TEST_API_KEY": "secret"}), patch(
+            "urllib.request.urlopen",
+            side_effect=[transient, success],
+        ) as urlopen, patch("time.sleep") as sleep:
+            chunks = list(provider.stream([ChatMessage.text("user", "hello")], []))
+
+        self.assertEqual([chunk.text for chunk in chunks if chunk.text], ["recovered"])
+        self.assertTrue(chunks[-1].done)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
+    def test_openai_compatible_stream_batches_small_text_deltas(self) -> None:
+        provider = OpenAICompatibleProvider(
+            model="test-model",
+            base_url="https://example.test/v1",
+            api_key_env="TEST_API_KEY",
+        )
+        fragments = ["x"] * 96
+        response = _FakeSSEHTTPResponse(
+            [
+                (
+                    "data: "
+                    + json.dumps({"choices": [{"delta": {"content": fragment}}]})
+                    + "\n"
+                ).encode("utf-8")
+                for fragment in fragments
+            ]
+            + [b"data: [DONE]\n"]
+        )
+
+        with patch.dict("os.environ", {"TEST_API_KEY": "secret"}), patch(
+            "urllib.request.urlopen",
+            return_value=response,
+        ):
+            chunks = list(provider.stream([ChatMessage.text("user", "hello")], []))
+
+        text_chunks = [chunk.text for chunk in chunks if chunk.text]
+        self.assertEqual("".join(text_chunks), "".join(fragments))
+        self.assertLess(len(text_chunks), len(fragments))
+        self.assertTrue(chunks[-1].done)
+
+    def test_openai_compatible_stream_does_not_retry_after_text(self) -> None:
+        provider = OpenAICompatibleProvider(
+            model="test-model",
+            base_url="https://example.test/v1",
+            api_key_env="TEST_API_KEY",
+            max_retries=2,
+        )
+        transient = _http_error(502, b'{"error":{"message":"connection lost"}}')
+        partial = _FakeSSEHTTPResponse([
+            b'data: {"choices":[{"delta":{"content":"partial"}}]}\n',
+            transient,
+        ])
+
+        with patch.dict("os.environ", {"TEST_API_KEY": "secret"}), patch(
+            "urllib.request.urlopen",
+            return_value=partial,
+        ) as urlopen, patch("time.sleep") as sleep:
+            stream = provider.stream([ChatMessage.text("user", "hello")], [])
+            self.assertEqual(next(stream).text, "partial")
+            with self.assertRaisesRegex(RuntimeError, "Provider HTTP 502"):
+                next(stream)
+
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_openai_compatible_stream_discards_partial_tool_calls_before_retry(self) -> None:
+        provider = OpenAICompatibleProvider(
+            model="test-model",
+            base_url="https://example.test/v1",
+            api_key_env="TEST_API_KEY",
+            max_retries=1,
+        )
+        transient = _http_error(502, b'{"error":{"message":"upstream unavailable"}}')
+        partial = _FakeSSEHTTPResponse([
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"list_","arguments":"{\\"path\\":\\""}}]}}]}\n',
+            transient,
+        ])
+        success = _FakeSSEHTTPResponse([
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"list_files","arguments":"{\\"path\\":\\".\\"}"}}]}}]}\n',
+            b'data: [DONE]\n',
+        ])
+
+        with patch.dict("os.environ", {"TEST_API_KEY": "secret"}), patch(
+            "urllib.request.urlopen",
+            side_effect=[partial, success],
+        ) as urlopen, patch("time.sleep") as sleep:
+            chunks = list(provider.stream([ChatMessage.text("user", "list files")], []))
+
+        self.assertEqual(chunks[-1].tool_calls[0].name, "list_files")
+        self.assertEqual(chunks[-1].tool_calls[0].arguments, {"path": "."})
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
     def test_unknown_provider_is_rejected_by_config_schema(self) -> None:
         """验证该场景下的输入、状态变化和输出是否符合预期。"""
         with self.assertRaises(ConfigValidationError):
@@ -215,6 +322,33 @@ class _FakeHTTPResponse:
 
     def read(self) -> bytes:
         return json.dumps(self.payload).encode("utf-8")
+
+
+class _FakeSSEHTTPResponse:
+    def __init__(self, lines: list[bytes | BaseException]) -> None:
+        self.lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def __iter__(self):
+        for line in self.lines:
+            if isinstance(line, BaseException):
+                raise line
+            yield line
+
+
+def _http_error(code: int, body: bytes) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://example.test/v1/chat/completions",
+        code,
+        "Provider error",
+        {},
+        io.BytesIO(body),
+    )
 
 
 if __name__ == "__main__":
