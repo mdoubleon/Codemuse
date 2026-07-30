@@ -461,18 +461,49 @@ async function refreshSession() {
   state.checkpoints = checkpoints.checkpoints || [];
 }
 
-async function poll() {
-  if (!state.sessionId) return false;
-  const payload = await request(`/api/sessions/${encodeURIComponent(state.sessionId)}/events?after=${state.cursor}`);
-  let hadNew = false;
-  if (Array.isArray(payload.events) && payload.events.length > 0) {
-    state.events.push(...payload.events);
-    state.cursor = payload.next_cursor || state.cursor;
-    hadNew = true;
-  }
+function poll() {
+  if (!state.sessionId) return Promise.resolve(false);
+  if (activePoll) return activePoll;
+
+  const sessionId = state.sessionId;
+  const cursor = state.cursor;
+  activePoll = pollSession(sessionId, cursor).finally(() => {
+    activePoll = null;
+  });
+  return activePoll;
+}
+
+async function pollSession(sessionId, cursor) {
+  const payload = await request(`/api/sessions/${encodeURIComponent(sessionId)}/events?after=${cursor}`);
+  // A session switch may complete while this request is in flight. Its events
+  // belong to the old session and must not be appended to the newly selected one.
+  if (sessionId !== state.sessionId) return false;
+
+  const added = appendSessionEvents(payload.events);
+  const nextCursor = Number(payload.next_cursor);
+  if (Number.isFinite(nextCursor) && nextCursor > state.cursor) state.cursor = nextCursor;
   await refreshSession();
+  if (sessionId !== state.sessionId) return false;
   render();
-  return hadNew;
+  return added > 0;
+}
+
+function appendSessionEvents(events) {
+  if (!Array.isArray(events) || !events.length) return 0;
+
+  const incoming = [];
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    const eventId = event.event_id;
+    if (eventId !== null && eventId !== undefined) {
+      const key = String(eventId);
+      if (state.eventIds.has(key)) continue;
+      state.eventIds.add(key);
+    }
+    incoming.push(event);
+  }
+  if (incoming.length) state.events.push(...incoming);
+  return incoming.length;
 }
 
 function schedulePoll(delay) {
@@ -1043,6 +1074,7 @@ function conversationEvents(items) {
 
 function compactAssistantStreamEvents(items) {
   const output = [];
+  const openStreams = new Map();
   for (const event of items) {
     const type = event.type || "";
     const text = event.message || event.delta || "";
@@ -1051,43 +1083,39 @@ function compactAssistantStreamEvents(items) {
       continue;
     }
 
-    const previousIndex = output.length - 1;
-    const previous = output[previousIndex];
     const streamKey = assistantStreamKey(event);
-    const continuesPreviousStream = isAssistantStreamEvent(type)
-      && previous?.__assistantStreamOpen === true
-      && previous.__assistantStreamKey === streamKey;
+    const openIndex = openStreams.get(streamKey);
+    const previous = Number.isInteger(openIndex) ? output[openIndex] : null;
 
-    if (continuesPreviousStream) {
-      output[previousIndex] = {
-        ...previous,
-        delta: `${previous.message || previous.delta || ""}${text}`,
-        message: null,
-        timestamp: event.timestamp || previous.timestamp
-      };
+    if (isAssistantStreamEvent(type)) {
+      if (previous?.__assistantStreamOpen === true) {
+        output[openIndex] = {
+          ...previous,
+          delta: `${previous.message || previous.delta || ""}${text}`,
+          message: null,
+          timestamp: event.timestamp || previous.timestamp
+        };
+      } else {
+        output.push({
+          ...event,
+          message: null,
+          delta: text,
+          __assistantStreamKey: streamKey,
+          __assistantStreamOpen: true
+        });
+        openStreams.set(streamKey, output.length - 1);
+      }
       continue;
     }
 
-    const completesPreviousStream = isAssistantMessageEvent(type)
-      && previous?.__assistantStreamOpen === true
-      && previous.__assistantStreamKey === streamKey;
-    if (completesPreviousStream) {
-      output[previousIndex] = {
+    if (isAssistantMessageEvent(type) && previous?.__assistantStreamOpen === true) {
+      // Diagnostics may arrive before the final event. Keep the stream DOM key.
+      output[openIndex] = {
         ...event,
         __assistantStreamKey: streamKey,
         __assistantStreamOpen: false
       };
-      continue;
-    }
-
-    if (isAssistantStreamEvent(type)) {
-      output.push({
-        ...event,
-        message: null,
-        delta: text,
-        __assistantStreamKey: streamKey,
-        __assistantStreamOpen: true
-      });
+      openStreams.delete(streamKey);
       continue;
     }
 

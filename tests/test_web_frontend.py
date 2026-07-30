@@ -45,6 +45,15 @@ expect(compacted.length === 1, "stream chunks must collapse to one terminal item
 expect(compacted[0].message === "你好", "final assistant message must replace the temporary stream text");
 expect(conversationEvents(streamEvents).length === 1, "conversation must contain one assistant message");
 expect(conversationEventKey(compacted[0]) === "assistant-stream:session-1:3", "one streamed response must keep a stable DOM key");
+const interleaved = compactAssistantStreamEvents([
+  { type: "message_delta", session_id: "session-1", turn_id: 5, delta: "A", event_id: 10 },
+  { type: "tool_result", session_id: "session-1", turn_id: 5, tool_name: "list_files", event_id: 11 },
+  { type: "message_delta", session_id: "session-1", turn_id: 5, delta: "B", event_id: 12 },
+  { type: "message", session_id: "session-1", turn_id: 5, message: "AB", event_id: 13 }
+]);
+const interleavedMessage = conversationEvents(interleaved);
+expect(interleavedMessage.length === 1 && interleavedMessage[0].message === "AB", "interleaved diagnostics must not create another stream bubble");
+expect(conversationEventKey(interleavedMessage[0]) === "assistant-stream:session-1:5", "an interleaved stream must retain its DOM key");
 const presentation = conversationPresentation(compacted[0]);
 expect(presentation.kind === "assistant" && presentation.text === "你好", "streamed content must retain its assistant presentation");
 const details = detailEvents([...streamEvents, { type: "tool_call", tool_name: "list_files" }]);
@@ -66,6 +75,15 @@ const restored = compactAssistantStreamEvents([
   { type: "message", session_id: "session-1", turn_id: 4, message: "second" }
 ]);
 expect(restored.length === 2, "separate completed messages must remain separate");
+
+state.events = [];
+state.eventIds.clear();
+const appended = appendSessionEvents([
+  { type: "tool_call", event_id: 20 },
+  { type: "tool_call", event_id: 20 },
+  { type: "tool_result", event_id: 21 }
+]);
+expect(appended === 2 && state.events.length === 2, "duplicate poll payloads must not inflate event counts");
 
 (async () => {
   const chatButton = {

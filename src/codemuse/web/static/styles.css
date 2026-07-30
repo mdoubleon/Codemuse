@@ -517,7 +517,7 @@ kbd {
   background:
     radial-gradient(800px 300px at 50% 0%, rgba(91, 108, 255, 0.04), transparent 70%),
     var(--panel);
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 .message {
@@ -526,11 +526,6 @@ kbd {
   align-items: flex-start;
   margin-bottom: 16px;
   min-width: 0;
-  animation: messageIn 0.3s var(--ease);
-}
-@keyframes messageIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 .message.user { flex-direction: row-reverse; }
 
