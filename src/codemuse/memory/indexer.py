@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from codemuse.memory.chroma_index import ChromaMemoryIndex, ChromaUnavailable
 from codemuse.memory.file_memory_chunker import FileMemoryChunk, chunk_workspace
 from codemuse.memory.file_memory_vector import FileMemoryVectorIndex
 
@@ -16,6 +17,8 @@ class WorkspaceIndexReport:
     index_path: str
     file_count: int
     chunk_count: int
+    backend: str = "local_json"
+    backend_error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """将 WorkspaceIndexReport 转换为可序列化字典。"""
@@ -24,6 +27,8 @@ class WorkspaceIndexReport:
             "index_path": self.index_path,
             "file_count": self.file_count,
             "chunk_count": self.chunk_count,
+            "backend": self.backend,
+            "backend_error": self.backend_error,
         }
 
 
@@ -46,11 +51,24 @@ def build_workspace_file_index(
     index = FileMemoryVectorIndex(index_path)
     index.build(chunks)
     index.save()
+    backend = "local_json"
+    backend_error = ""
+    chroma_path = root / ".data" / "codemuse" / "rag" / "chroma"
+    try:
+        ChromaMemoryIndex(chroma_path).build(chunks)
+        backend = "chroma+local_json"
+    except ChromaUnavailable:
+        # The JSON index remains the built-in offline backend.
+        pass
+    except Exception as exc:  # noqa: BLE001 - optional backend must not block indexing
+        backend_error = f"{type(exc).__name__}: {exc}"
     return WorkspaceIndexReport(
         workspace=str(root),
         index_path=str(index_path),
         file_count=len({chunk.path for chunk in chunks}),
         chunk_count=len(chunks),
+        backend=backend,
+        backend_error=backend_error,
     )
 
 

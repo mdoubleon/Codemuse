@@ -8,7 +8,7 @@ import time
 
 from codemuse.capabilities.descriptor import CapabilityDescriptor
 from codemuse.domain.messages import ChatMessage
-from codemuse.skills.loader import SkillDescriptor, load_skills
+from codemuse.skills.loader import SkillDescriptor, load_skills, read_skill_body
 
 
 @dataclass
@@ -69,7 +69,9 @@ class SkillRuntime:
             skill = self.available_skills().get(name)
             if skill is None or skill.status != "loaded":
                 continue
-            body = skill.path.read_text(encoding="utf-8-sig")[:8000]
+            body, truncated = read_skill_body(skill.path, max_chars=8000)
+            if truncated:
+                body += "\n\n[skill body truncated]"
             sections.extend([f"\n[Skill: {skill.name}]", body])
         injected = ChatMessage.text("system", "\n".join(sections))
         injected.metadata.update({"skills": names, "generated_at": time.time()})
@@ -86,11 +88,9 @@ class SkillRuntime:
         skill = skills[name]
         if skill.status != "loaded":
             raise RuntimeError(f"Skill is not loaded: {name}: {skill.error}")
-        body = skill.path.read_text(encoding="utf-8-sig")
-        content = body[:max_chars]
-        truncated = len(body) > max_chars
+        content, truncated = read_skill_body(skill.path, max_chars=max_chars)
         if truncated:
-            content += f"\n\n[truncated {len(body) - max_chars} characters]"
+            content += "\n\n[skill body truncated]"
         rendered = "\n".join(
             [
                 f"# Skill: {skill.name}",

@@ -37,6 +37,9 @@ class PatchArtifact:
     changed_paths: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     status: str = "staged"
+    review_status: str = "pending"
+    review_summary: str = ""
+    reviewed_at: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -118,9 +121,20 @@ class WorktreeManager:
 
     def update_status(self, artifact: PatchArtifact, status: str) -> PatchArtifact:
         artifact.status = status
+        self._save_artifact(artifact)
+        return artifact
+
+    def record_review(self, artifact: PatchArtifact, *, approved: bool, summary: str) -> PatchArtifact:
+        """Persist the reviewer verdict that gates parent-workspace application."""
+        artifact.review_status = "approved" if approved else "rejected"
+        artifact.review_summary = summary.strip()
+        artifact.reviewed_at = time.time()
+        self._save_artifact(artifact)
+        return artifact
+
+    def _save_artifact(self, artifact: PatchArtifact) -> None:
         meta_path = Path(artifact.patch_path).with_suffix(".json")
         meta_path.write_text(json.dumps(artifact.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-        return artifact
 
     def cleanup(self, handle: WorktreeHandle | PatchArtifact) -> bool:
         """Unregister and remove exactly one managed isolated worktree."""

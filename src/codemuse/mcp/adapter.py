@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -42,9 +43,14 @@ class MCPToolAdapter(BaseTool):
             name=self.public_name,
             description=f"MCP tool `{self.descriptor.name}` from server `{self.descriptor.server_name}`. {self.descriptor.description}".strip(),
             parameters=self.descriptor.input_schema,
-            requires_confirmation=self.descriptor.approval_mode == "ask" or self.descriptor.is_destructive,
+            requires_confirmation=(
+                self.descriptor.approval_mode == "ask"
+                or self.descriptor.is_destructive
+                or self.descriptor.is_remote
+                or self.descriptor.requires_auth
+            ),
             permission_domain=self._permission_domain(),
-            side_effect=self.descriptor.is_destructive,
+            side_effect=self.descriptor.is_destructive or self.descriptor.is_remote or self.descriptor.requires_auth,
         )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
@@ -67,10 +73,10 @@ class MCPToolAdapter(BaseTool):
         """根据 MCP 工具描述推断 CodeMuse 使用的权限域。"""
         if self.descriptor.is_destructive:
             return "write"
-        if self.descriptor.is_remote:
-            return "network"
         if self.descriptor.requires_auth:
             return "external"
+        if self.descriptor.is_remote:
+            return "network"
         return "read"
 
 
@@ -114,6 +120,67 @@ class MCPStatusTool(BaseTool):
         return ToolResult(tool_name=self.spec.name, content="\n".join(lines), details={"mcp": report})
 
 
+class MCPActivateTool(BaseTool):
+    """Explicitly activate one configured MCP server after user approval."""
+
+    def __init__(
+        self,
+        workspace: Path,
+        manager: MCPManager,
+        register_descriptors: Callable[[list[MCPToolDescriptor]], list[str]],
+    ) -> None:
+        super().__init__(workspace)
+        self.manager = manager
+        self._register_descriptors = register_descriptors
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="mcp_activate",
+            description=(
+                "Activate one configured MCP server, start its external session, "
+                "and discover tools. This operation always requires explicit approval."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"server": {"type": "string", "minLength": 1}},
+                "required": ["server"],
+                "additionalProperties": False,
+            },
+            requires_confirmation=True,
+            permission_domain="external",
+            side_effect=True,
+        )
+
+    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        server_name = str(arguments.get("server") or "").strip()
+        try:
+            descriptors = self.manager.activate(server_name)
+            registered = self._register_descriptors(descriptors)
+        except Exception as exc:  # noqa: BLE001 - return a bounded tool error
+            return ToolResult(
+                tool_name=self.spec.name,
+                content=f"MCP activation failed for {server_name or '<missing>'}: {exc}",
+                is_error=True,
+                details={"server": server_name, "error_type": type(exc).__name__},
+            )
+        report = self.manager.status_report()
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=(
+                f"Activated MCP server '{server_name}'. "
+                f"Discovered {len(descriptors)} tool(s); registered {len(registered)} new tool(s)."
+            ),
+            details={
+                "server": server_name,
+                "activated": True,
+                "discovered_tools": [descriptor.name for descriptor in descriptors],
+                "registered_tools": registered,
+                "mcp": report,
+            },
+        )
+
+
 def register_mcp_tools(registry: ToolRegistry, workspace: Path, manager: MCPManager) -> list[str]:
     """发现 MCP 工具，并注册到 ToolRegistry。
 
@@ -123,8 +190,35 @@ def register_mcp_tools(registry: ToolRegistry, workspace: Path, manager: MCPMana
     registered: list[str] = []
     registry.register(MCPStatusTool(workspace, manager), category="mcp")
     registered.append("mcp_status")
+    register_descriptors = lambda descriptors: _register_descriptors(
+        registry,
+        workspace,
+        manager,
+        descriptors,
+    )
+    registry.register(
+        MCPActivateTool(workspace, manager, register_descriptors),
+        category="mcp",
+    )
+    registered.append("mcp_activate")
     for descriptor in manager.discover_tools():
+        registered.extend(register_descriptors([descriptor]))
+    return registered
+
+
+def _register_descriptors(
+    registry: ToolRegistry,
+    workspace: Path,
+    manager: MCPManager,
+    descriptors: list[MCPToolDescriptor],
+) -> list[str]:
+    """Register discovered descriptors without ever opening an MCP session."""
+    registered: list[str] = []
+    existing = set(registry.names())
+    for descriptor in descriptors:
         public_name = public_mcp_tool_name(manager.tool_prefix, descriptor.server_name, descriptor.name)
+        if public_name in existing:
+            continue
         registration = ToolRegistration(
             name=public_name,
             category="mcp",
@@ -137,13 +231,23 @@ def register_mcp_tools(registry: ToolRegistry, workspace: Path, manager: MCPMana
             metadata=ToolMetadata(
                 name=public_name,
                 category="mcp",
-                permission_domain="write" if descriptor.is_destructive else ("network" if descriptor.is_remote else "read"),
-                requires_confirmation=descriptor.approval_mode == "ask" or descriptor.is_destructive,
+                permission_domain=(
+                    "write"
+                    if descriptor.is_destructive
+                    else ("external" if descriptor.requires_auth else ("network" if descriptor.is_remote else "read"))
+                ),
+                requires_confirmation=(
+                    descriptor.approval_mode == "ask"
+                    or descriptor.is_destructive
+                    or descriptor.is_remote
+                    or descriptor.requires_auth
+                ),
                 model_callable=True,
-                side_effect=descriptor.is_destructive,
+                side_effect=descriptor.is_destructive or descriptor.is_remote or descriptor.requires_auth,
             ),
         )
         registry.register_factory(registration)
+        existing.add(public_name)
         registered.append(public_name)
     return registered
 

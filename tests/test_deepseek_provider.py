@@ -42,9 +42,21 @@ class DeepSeekProviderTests(unittest.TestCase):
                 json.dumps({"model": {"provider": "deepseek"}}),
                 encoding="utf-8",
             )
-            effective = get_config_manager(workspace).get_effective_config().model
+            user_config = workspace / "user-config.json"
+            with patch.dict("os.environ", {"CODEMUSE_USER_CONFIG_PATH": str(user_config)}, clear=True):
+                effective = get_config_manager(workspace).get_effective_config().model
+            with patch.dict(
+                "os.environ",
+                {
+                    "CODEMUSE_USER_CONFIG_PATH": str(user_config),
+                    "CODEMUSE_TRUST_WORKSPACE_MODEL_CONFIG": "1",
+                },
+                clear=True,
+            ):
+                trusted_effective = get_config_manager(workspace).get_effective_config().model
 
-        self.assertEqual(effective.model, DEFAULT_DEEPSEEK_MODEL)
+        self.assertEqual(effective.provider, "fake")
+        self.assertEqual(trusted_effective.model, DEFAULT_DEEPSEEK_MODEL)
 
     def test_schema_and_registry_create_a_configured_deepseek_provider(self) -> None:
         config = CodeMuseConfig.from_dict(

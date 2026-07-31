@@ -19,17 +19,18 @@ from codemuse.runtime.events import AgentEvent
 from codemuse.runtime.compaction import ConversationCompactor
 from codemuse.runtime.cancellation import CancellationToken
 from codemuse.runtime.emitter import LifecycleEmitter
+from codemuse.runtime.executor import ApprovalValidationError, Executor, ToolExecutionError
 from codemuse.runtime.hooks import RuntimeHooks
+from codemuse.runtime.planner import Plan, PlannedToolCall, Planner
 from codemuse.runtime.turn_loop import TurnController
 from codemuse.runtime.git_checkpoint import WorkspaceSnapshotManager
 from codemuse.runtime.safe_rewind import SafeRewindOrchestrator
 from codemuse.runtime.state import AgentState
-from codemuse.storage.approvals import PendingApprovalStore
+from codemuse.storage.approvals import PendingApproval, PendingApprovalStore
 from codemuse.storage.checkpoints import CheckpointStore
 from codemuse.storage.sessions import SessionRecord, SessionStore
 from codemuse.storage.timeline import TimelineStore
-from codemuse.tools.effects import build_effect_digest, build_tool_effect_preview, validate_effect_digest, validate_tool_effect_preview
-from codemuse.tools.policy import ALLOW, ASK, DENY, ToolPolicyEvaluator
+from codemuse.tools.policy import ToolPolicyEvaluator
 from codemuse.tools.registry import ToolRegistry
 
 Subscriber = Callable[[AgentEvent], None]
@@ -80,6 +81,8 @@ class AgentRuntime:
         turn_controller: TurnController | None = None,
         compactor: ConversationCompactor | None = None,
         cancellation_token: CancellationToken | None = None,
+        planner: Planner | None = None,
+        executor: Executor | None = None,
     ) -> None:
         """注入模型、工具注册表、存储和可选记忆/审批/检查点组件，恢复会话状态。"""
         self.workspace = workspace.resolve()
@@ -117,6 +120,18 @@ class AgentRuntime:
         self._cancel_event = threading.Event()
         self._owns_cancellation_token = cancellation_token is None
         self.cancellation_token = cancellation_token or CancellationToken()
+        self.planner = planner or Planner(
+            workspace=self.workspace,
+            tool_registry=self.tool_registry,
+            policy_evaluator=self.policy_evaluator,
+        )
+        self.executor = executor or Executor(
+            workspace=self.workspace,
+            tool_registry=self.tool_registry,
+            approval_store=self.approval_store,
+            policy_evaluator=self.policy_evaluator,
+        )
+        self.last_plan: Plan | None = None
         self._active_turn_node_id: str | None = None
         self._prompt_tool_calls_used = 0
         self._prompt_tool_budget_active = False
@@ -168,7 +183,7 @@ class AgentRuntime:
     def prompt(self, text: str) -> list[AgentEvent]:
         """接收用户输入并驱动 Agent 执行一轮任务。"""
         if self._restore_pending_tool_calls():
-            raise RuntimeError("Cannot start a new prompt while this session has pending tool approvals.")
+            raise RuntimeError("Cannot start a new prompt while this session has unresolved approvals.")
         self._prompt_tool_calls_used = 0
         self._prompt_tool_budget_active = True
         self.state.messages.append(ChatMessage.text("user", text))
@@ -215,6 +230,19 @@ class AgentRuntime:
         workspace_restore: dict[str, Any] | None = None
         restore_workspace = mode in {"workspace_only", "conversation_and_workspace"}
         restore_conversation = mode in {"conversation_only", "conversation_and_workspace"}
+        rewind_preview = SafeRewindOrchestrator(self.workspace, self.checkpoint_store.root).preview_rewind(
+            checkpoint_id,
+            mode=mode,
+        )
+        approval_reconciliation = {"invalidated": [], "retained": [], "blockers": []}
+        if restore_conversation:
+            approval_reconciliation = self._reconcile_approvals_for_rewind(checkpoint)
+            if approval_reconciliation["blockers"]:
+                blockers = ", ".join(approval_reconciliation["blockers"])
+                raise RuntimeError(
+                    "Cannot rewind while later approval execution is unresolved: "
+                    f"{blockers}"
+                )
         if restore_workspace and checkpoint.metadata.get("workspace_snapshot") and self.checkpoint_store is not None:
             workspace_restore = SafeRewindOrchestrator(self.workspace, self.checkpoint_store.root).rewind_workspace(checkpoint_id)
         if restore_conversation:
@@ -227,6 +255,14 @@ class AgentRuntime:
             self.state.phase = "idle"
             self.state.is_running = False
             self.state.error_message = None
+            checkpoint_head_id = str(checkpoint.metadata.get("head_id") or "")
+            if checkpoint_head_id and any(
+                str(node.get("turn_node_id") or "") == checkpoint_head_id
+                for node in self.session.turns
+            ):
+                self.session.active_head_id = checkpoint_head_id
+            self._active_turn_node_id = None
+            self._restore_pending_tool_calls()
             self._persist()
         self._emit(
             "checkpoint_rewound",
@@ -240,6 +276,10 @@ class AgentRuntime:
                 "restored_conversation": restore_conversation,
                 "restored_workspace": bool(workspace_restore),
                 "workspace_restore": workspace_restore,
+                "risk_preview": rewind_preview.restore_preview,
+                "warning_messages": rewind_preview.warning_messages,
+                "invalidated_approval_ids": approval_reconciliation["invalidated"],
+                "retained_approval_ids": approval_reconciliation["retained"],
             },
         )
         return captured
@@ -249,45 +289,100 @@ class AgentRuntime:
         if self.approval_store is None:
             raise RuntimeError("Approval store is not configured.")
         approval = self.approval_store.load(approval_id)
-        if approval.status != "pending":
-            raise ValueError(f"Approval is not pending: {approval_id}")
         if approval.session_id != self.session_id:
             raise ValueError(f"Approval belongs to another session: {approval.session_id}")
 
+        # A pending effect is part of the turn head that staged it.  Do not let a
+        # sibling branch consume it just because both branches share a session id.
+        # Stale/invalid approvals still go through the Executor so callers receive
+        # the persisted terminal reason rather than a misleading head error.
+        if approval.status == "pending" or (
+            approval.status == "approved" and approval.execution_status == "completed"
+        ):
+            self._require_approval_on_active_head(approval)
+
         call = ToolCall(id=approval.tool_call_id, name=approval.tool_name, arguments=approval.arguments)
         captured: list[AgentEvent] = []
-        if not self.tools_enabled:
+        if not self.tools_enabled and approval.status == "pending":
             return self._block_approved_tool_when_disabled(approval_id, call, captured)
-        digest_validation = validate_effect_digest(approval.tool_name, approval.arguments, approval.details)
-        if not digest_validation["ok"]:
-            self._mark_invalid_approval(approval_id, call, digest_validation, captured)
+        if approval.status == "pending":
+            self._require_no_unresolved_session_execution()
+
+        def before_execute(executing_call: ToolCall, execution_id: str) -> None:
+            self._emit(
+                "approval_approved",
+                captured,
+                tool_name=executing_call.name,
+                message=f"Approved: {approval_id}",
+                details={"approval_id": approval_id, "execution_id": execution_id},
+            )
+            self.state.phase = "executing"
+            self._emit(
+                "tool_call",
+                captured,
+                tool_name=executing_call.name,
+                details={
+                    "arguments": executing_call.arguments,
+                    "approval_id": approval_id,
+                    "execution_id": execution_id,
+                },
+            )
+            self._checkpoint_before_tool(executing_call, captured)
+
+        def transform_result(executing_call: ToolCall, result):
+            result_decision = self.emitter.emit_tool_result(captured[-1], self.state, executing_call, result)
+            return result_decision.result if result_decision.result is not None else result
+
+        try:
+            outcome = self.executor.execute_approved(
+                approval_id,
+                session_id=self.session_id,
+                before_execute=before_execute,
+                transform_result=transform_result,
+            )
+        except ApprovalValidationError as exc:
+            if exc.status == "invalid":
+                self._mark_invalid_approval(approval_id, call, exc.validation, captured)
+            else:
+                self._mark_stale_approval(approval_id, call, exc.validation, captured)
+            return self._continue_after_approval_resolution(captured)
+        except ToolExecutionError as exc:
+            self._record_approved_execution_failure(approval_id, exc, captured)
             return self._continue_after_approval_resolution(captured)
 
-        validation = validate_tool_effect_preview(
-            self.workspace,
-            approval.tool_name,
-            approval.arguments,
-            approval.details.get("effect_preview"),
+        already_recorded = any(
+            message.role == "tool" and message.tool_call_id == outcome.call.id
+            for message in self.state.messages
         )
-        if not validation["ok"]:
-            self._mark_stale_approval(approval_id, call, validation, captured)
-            return self._continue_after_approval_resolution(captured)
-
-        self._emit("approval_approved", captured, tool_name=approval.tool_name, message=f"Approved: {approval_id}")
-        # 用户批准后，直接执行原始工具调用；这里不再重复进入审批门。
-        self.state.phase = "executing"
-        self._emit("tool_call", captured, tool_name=approval.tool_name, details={"arguments": approval.arguments, "approval_id": approval_id})
-        self._checkpoint_before_tool(call, captured)
-        result = self.tool_registry.execute(approval.tool_name, approval.arguments)
-        result.tool_call_id = approval.tool_call_id
-        result_decision = self.emitter.emit_tool_result(captured[-1], self.state, call, result)
-        if result_decision.result is not None:
-            result = result_decision.result
-        self.state.messages.append(result.as_chat_message())
-        self.state.pending_tool_calls = [call for call in self.state.pending_tool_calls if call.id != approval.tool_call_id]
-        self.approval_store.mark(approval_id, "approved")
+        if not already_recorded:
+            self.state.messages.append(outcome.result.as_chat_message())
+        self.state.pending_tool_calls = [item for item in self.state.pending_tool_calls if item.id != outcome.call.id]
         self._persist()
-        self._emit("tool_result", captured, tool_name=approval.tool_name, message=result.content[:500], details=result.details)
+        if outcome.replayed:
+            self._emit(
+                "approval_replayed",
+                captured,
+                tool_name=outcome.call.name,
+                message=f"Approval was already completed: {approval_id}",
+                details={"approval_id": approval_id, "execution_id": outcome.execution_id},
+            )
+            # A repeated API request must not advance the model twice. Recovery from a
+            # crash after durable completion may still need to append the missing result.
+            return self._continue_after_approval_resolution(captured) if not already_recorded else captured
+        self._emit(
+            "approval_completed",
+            captured,
+            tool_name=outcome.call.name,
+            message=f"Approval execution completed: {approval_id}",
+            details={"approval_id": approval_id, "execution_id": outcome.execution_id},
+        )
+        self._emit(
+            "tool_result",
+            captured,
+            tool_name=outcome.call.name,
+            message=outcome.result.content[:500],
+            details={**outcome.result.details, "approval_id": approval_id, "execution_id": outcome.execution_id},
+        )
         return self._continue_after_approval_resolution(captured)
 
     def reject(self, approval_id: str) -> list[AgentEvent]:
@@ -299,6 +394,7 @@ class AgentRuntime:
             raise ValueError(f"Approval is not pending: {approval_id}")
         if approval.session_id != self.session_id:
             raise ValueError(f"Approval belongs to another session: {approval.session_id}")
+        self._require_approval_on_active_head(approval)
 
         captured: list[AgentEvent] = []
         self.approval_store.mark(approval_id, "rejected")
@@ -427,31 +523,65 @@ class AgentRuntime:
                         keep_running = False
                         self._emit("turn_end", captured, details={"turn_id": self.state.turn_id, "tools_enabled": False})
                         continue
-                    assistant_message = ChatMessage(role="assistant", tool_calls=response.tool_calls)
+                    plan = self.planner.create_plan(
+                        session_id=self.session_id,
+                        turn_id=self.state.turn_id,
+                        tool_calls=response.tool_calls,
+                        assistant_text=response.text,
+                    )
+                    self.last_plan = plan
+                    self.state.pending_plan_token = plan.plan_id
+                    self._emit(
+                        "plan_created",
+                        captured,
+                        details={
+                            "plan_id": plan.plan_id,
+                            "tool_call_count": len(plan.tool_calls),
+                            "approval_count": sum(1 for item in plan.tool_calls if item.requires_approval),
+                            "denied_count": sum(1 for item in plan.tool_calls if not item.executable),
+                        },
+                    )
+                    assistant_message = ChatMessage(role="assistant", tool_calls=[item.call for item in plan.tool_calls])
                     self.state.messages.append(assistant_message)
                     self.state.phase = "executing"
                     stopped_for_approval = False
                     tool_failed = False
-                    for call in response.tool_calls:
+                    for planned in plan.tool_calls:
+                        call = planned.call
                         if self.is_cancel_requested():
                             cancelled = True
                             break
-                        self._emit("tool_call", captured, tool_name=call.name, details={"arguments": call.arguments})
+                        self._emit(
+                            "tool_call",
+                            captured,
+                            tool_name=call.name,
+                            details={
+                                "arguments": call.arguments,
+                                "plan_id": plan.plan_id,
+                                "planned_action": planned.action,
+                            },
+                        )
                         hook_decision = self.emitter.emit_tool_call(captured[-1], self.state, call, self.tool_registry)
                         if hook_decision.action == "deny":
                             tool_failed = True
                             self._append_tool_error(call, hook_decision.message or "Tool call blocked by runtime hook.")
                             self._emit("tool_error", captured, tool_name=call.name, message=hook_decision.message or "Tool call blocked by runtime hook.", is_error=True)
                             continue
-                        decision = self._policy_decision(call)
-                        if decision.action == DENY:
+                        if not planned.executable:
                             tool_failed = True
-                            self._append_tool_error(call, decision.reason)
-                            self._emit("tool_error", captured, tool_name=call.name, message=decision.reason, details=decision.details, is_error=True)
+                            self._append_tool_error(call, planned.reason)
+                            self._emit(
+                                "tool_error",
+                                captured,
+                                tool_name=call.name,
+                                message=planned.reason,
+                                details={**planned.details, "plan_id": plan.plan_id},
+                                is_error=True,
+                            )
                             continue
-                        if decision.action == ASK:
+                        if planned.requires_approval:
                             self.state.phase = self.turn_controller.before_plan_approval().phase
-                            approval = self._stage_approval(call, decision.reason)
+                            approval = self._stage_approval(planned, plan_id=plan.plan_id)
                             self.state.pending_tool_calls.append(call)
                             self.state.phase = "awaiting_approval"
                             stopped_for_approval = True
@@ -469,27 +599,48 @@ class AgentRuntime:
                                 details=approval_details,
                             )
                             continue
+
+                        def before_execute(executing_call: ToolCall, _execution_id: str) -> None:
+                            self._checkpoint_before_tool(executing_call, captured)
+
+                        def transform_result(executing_call: ToolCall, result):
+                            result_decision = self.emitter.emit_tool_result(captured[-1], self.state, executing_call, result)
+                            return result_decision.result if result_decision.result is not None else result
+
                         try:
-                            self._checkpoint_before_tool(call, captured)
-                            result = self.tool_registry.execute(call.name, call.arguments)
-                            result.tool_call_id = call.id
-                            result_decision = self.emitter.emit_tool_result(captured[-1], self.state, call, result)
-                            if result_decision.result is not None:
-                                result = result_decision.result
-                            self.state.messages.append(result.as_chat_message())
-                            self._emit("tool_result", captured, tool_name=call.name, message=result.content[:500], details=result.details)
-                        except Exception as exc:  # noqa: BLE001 - phase 1 records tool failures as observations
+                            outcome = self.executor.execute(
+                                planned,
+                                before_execute=before_execute,
+                                transform_result=transform_result,
+                            )
+                            self.state.messages.append(outcome.result.as_chat_message())
+                            self._emit(
+                                "tool_result",
+                                captured,
+                                tool_name=call.name,
+                                message=outcome.result.content[:500],
+                                details={**outcome.result.details, "execution_id": outcome.execution_id, "plan_id": plan.plan_id},
+                            )
+                        except ToolExecutionError as exc:
                             tool_failed = True
                             error_text = str(exc)
-                            error_decision = self.emitter.emit_tool_error(captured[-1], self.state, call, exc)
+                            self.emitter.emit_tool_error(captured[-1], self.state, call, exc.cause)
                             self._append_tool_error(call, error_text)
-                            self._emit("tool_error", captured, tool_name=call.name, message=error_text, is_error=True)
+                            self._emit(
+                                "tool_error",
+                                captured,
+                                tool_name=call.name,
+                                message=error_text,
+                                details={"execution_id": exc.execution_id, "plan_id": plan.plan_id},
+                                is_error=True,
+                            )
                     if cancelled:
                         break
                     if stopped_for_approval:
                         keep_running = False
                         self._emit("turn_end", captured, details={"turn_id": self.state.turn_id, "phase": "awaiting_approval"})
                         continue
+                    self.state.pending_plan_token = None
                     tool_turns += 1
                     next_message = self.state.queued_messages[0] if self.state.queued_messages else None
                     round_decision = self.turn_controller.after_tool_round(
@@ -515,9 +666,7 @@ class AgentRuntime:
                     message="Agent cancelled by user request.",
                     details={"turn_id": self.state.turn_id},
                 )
-            elif self._restore_pending_tool_calls():
-                self.state.phase = "awaiting_approval"
-            else:
+            elif not self._restore_pending_tool_calls():
                 self.state.phase = "idle"
                 self._reset_prompt_tool_budget()
             self.state.is_running = False
@@ -902,30 +1051,46 @@ class AgentRuntime:
         text = message.text_content() or "(empty tool result)"
         return ChatMessage.text("assistant", f"Tool observation from {name}:\n{text}")
 
-    def _policy_decision(self, call: ToolCall):
-        """读取工具规格，并根据权限域和副作用计算安全策略。"""
-        spec = self.tool_registry.get_spec(call.name)
-        return self.policy_evaluator.evaluate(spec)
-
-    def _stage_approval(self, call: ToolCall, reason: str):
-        """创建审批单，并在审批单里保存执行前影响预览。"""
+    def _stage_approval(self, planned: PlannedToolCall, *, plan_id: str):
+        """Persist the Planner's exact-effect contract without recomputing it."""
         if self.approval_store is None:
             raise RuntimeError("Approval store is not configured.")
-        details: dict[str, Any] = {}
-        effect_preview = build_tool_effect_preview(self.workspace, call.name, call.arguments)
-        if effect_preview is not None:
-            details["effect_preview"] = effect_preview
-        details["effect_digest"] = build_effect_digest(call.name, call.arguments, details.get("effect_preview"))
-        return self.approval_store.create(session_id=self.session_id, call=call, reason=reason, details=details)
+        details = planned.approval_details(plan_id=plan_id)
+        # Bind the approval to its turn-DAG head.  Session ids alone are not a
+        # sufficient capability boundary once sibling heads can be resumed.
+        details["head_id"] = self.session.active_head_id
+        return self.approval_store.create(
+            session_id=self.session_id,
+            call=planned.call,
+            reason=planned.reason,
+            details=details,
+        )
 
     def _restore_pending_tool_calls(self) -> bool:
         """从持久化审批恢复当前会话的未决调用，支持进程重启后继续同一工具批次。"""
         if self.approval_store is None:
             return bool(self.state.pending_tool_calls)
-        pending = [
+        session_approvals = [
             approval
-            for approval in self.approval_store.list(status="pending")
+            for approval in self.approval_store.list(status=None)
             if approval.session_id == self.session_id
+        ]
+        approvals = [
+            approval
+            for approval in session_approvals
+            if self._approval_on_active_head(approval)
+        ]
+        pending = [approval for approval in approvals if approval.status == "pending"]
+        unresolved = [
+            approval
+            for approval in approvals
+            if approval.execution_status == "executing" and approval.status != "pending"
+        ]
+        blocking = [*pending, *unresolved]
+        session_unresolved = [
+            approval
+            for approval in session_approvals
+            if approval.execution_status == "executing"
         ]
         self.state.pending_tool_calls = [
             ToolCall(
@@ -933,20 +1098,129 @@ class AgentRuntime:
                 name=approval.tool_name,
                 arguments=dict(approval.arguments),
             )
-            for approval in reversed(pending)
+            for approval in reversed(blocking)
         ]
-        if pending:
-            self.state.phase = "awaiting_approval"
-        return bool(pending)
+        if blocking or session_unresolved:
+            plan_ids = [str(approval.details.get("plan_id") or "") for approval in blocking]
+            self.state.pending_plan_token = next((plan_id for plan_id in plan_ids if plan_id), None) if blocking else None
+            self.state.phase = "execution_recovery_required" if session_unresolved else "awaiting_approval"
+        return bool(blocking or session_unresolved)
+
+    def _require_no_unresolved_session_execution(self) -> None:
+        """Keep new side effects out of a workspace with an ambiguous in-flight one."""
+        if self.approval_store is None:
+            return
+        unresolved_ids = [
+            approval.approval_id
+            for approval in self.approval_store.list(status=None)
+            if approval.session_id == self.session_id and approval.execution_status == "executing"
+        ]
+        if unresolved_ids:
+            raise RuntimeError(
+                "Cannot execute a pending approval while another approval execution is unresolved: "
+                + ", ".join(unresolved_ids)
+            )
+
+    def _require_approval_on_active_head(self, approval: PendingApproval) -> None:
+        """Reject cross-head approval use without changing the original record."""
+        if self._approval_on_active_head(approval):
+            return
+        approval_head_id = str(approval.details.get("head_id") or "legacy-message-context")
+        active_head_id = str(self.session.active_head_id or "none")
+        raise ValueError(
+            "Approval belongs to a different session head "
+            f"(approval_head={approval_head_id}, active_head={active_head_id}). "
+            "Switch to the originating head before approving or rejecting it."
+        )
+
+    def _approval_on_active_head(self, approval: PendingApproval) -> bool:
+        """Return whether an approval is visible from the selected turn-DAG head."""
+        approval_head_id = str(approval.details.get("head_id") or "")
+        if approval_head_id:
+            return self._head_descends_from(self.session.active_head_id, approval_head_id)
+        # Pre-head-binding approvals remain usable only where their originating
+        # tool call is still present in the active conversation snapshot.
+        return any(
+            call.id == approval.tool_call_id
+            and call.name == approval.tool_name
+            and call.arguments == approval.arguments
+            for message in self.state.messages
+            for call in message.tool_calls
+        )
+
+    def _head_descends_from(self, head_id: str | None, ancestor_head_id: str) -> bool:
+        """Check whether ``head_id`` is the approval head or one of its descendants."""
+        cursor = str(head_id or "")
+        if not cursor:
+            return False
+        nodes = {
+            str(node.get("turn_node_id") or ""): node
+            for node in self.session.turns
+            if str(node.get("turn_node_id") or "")
+        }
+        seen: set[str] = set()
+        while cursor and cursor not in seen:
+            if cursor == ancestor_head_id:
+                return True
+            seen.add(cursor)
+            node = nodes.get(cursor)
+            if node is None:
+                return False
+            cursor = str(node.get("parent_head_id") or "")
+        return False
 
     def _continue_after_approval_resolution(self, captured: list[AgentEvent]) -> list[AgentEvent]:
         """等待同批其他审批完成；最后一个审批解决后才重新调用模型。"""
         if self._restore_pending_tool_calls():
-            self.state.phase = "awaiting_approval"
             self._persist()
             return captured
+        self.state.pending_plan_token = None
         captured.extend(self._run_loop())
         return captured
+
+    def _record_approved_execution_failure(
+        self,
+        approval_id: str,
+        failure: ToolExecutionError,
+        captured: list[AgentEvent],
+    ) -> None:
+        """Record a terminal approved-tool failure without making it retryable."""
+        call = failure.call
+        self.emitter.emit_tool_error(
+            captured[-1] if captured else AgentEvent(
+                type="tool_error",
+                session_id=self.session_id,
+                turn_id=self.state.turn_id,
+                phase=self.state.phase,
+            ),
+            self.state,
+            call,
+            failure.cause,
+        )
+        self._append_tool_error(call, str(failure))
+        self.state.pending_tool_calls = [item for item in self.state.pending_tool_calls if item.id != call.id]
+        self._persist()
+        details = {
+            "approval_id": approval_id,
+            "execution_id": failure.execution_id,
+            "execution_status": "failed",
+        }
+        self._emit(
+            "approval_failed",
+            captured,
+            tool_name=call.name,
+            message=str(failure),
+            details=details,
+            is_error=True,
+        )
+        self._emit(
+            "tool_error",
+            captured,
+            tool_name=call.name,
+            message=str(failure),
+            details=details,
+            is_error=True,
+        )
 
     def _mark_invalid_approval(
         self,
@@ -1052,7 +1326,12 @@ class AgentRuntime:
         """保存会话检查点，并附加当前工作区文件快照。"""
         if self.checkpoint_store is None:
             raise RuntimeError("Checkpoint store is not configured.")
-        metadata = {**metadata, "head_id": self.session.active_head_id, "turn_id": self.state.turn_id}
+        metadata = {
+            **metadata,
+            "head_id": self.session.active_head_id,
+            "turn_id": self.state.turn_id,
+            "approval_states": self._checkpoint_approval_states(),
+        }
         record = self.checkpoint_store.create(
             session_id=self.session_id,
             label=label,
@@ -1064,6 +1343,43 @@ class AgentRuntime:
         record.metadata["workspace_snapshot"] = snapshot
         self.checkpoint_store.save(record)
         return record
+
+    def _checkpoint_approval_states(self) -> dict[str, dict[str, Any]]:
+        """Capture approval state so rewind can retain only checkpoint-consistent effects."""
+        if self.approval_store is None:
+            return {}
+        return {
+            approval.approval_id: {
+                "status": approval.status,
+                "execution_status": approval.execution_status,
+                "execution_id": approval.execution_id,
+                "updated_at": approval.updated_at,
+            }
+            for approval in self.approval_store.list(status=None)
+            if approval.session_id == self.session_id and self._approval_on_active_head(approval)
+        }
+
+    def _reconcile_approvals_for_rewind(self, checkpoint: CheckpointRecord) -> dict[str, list[str]]:
+        """Prevent post-checkpoint approvals from surviving a conversation rewind."""
+        if self.approval_store is None:
+            return {"invalidated": [], "retained": [], "blockers": []}
+        states = checkpoint.metadata.get("approval_states")
+        snapshots = (
+            {str(key): dict(value) for key, value in states.items() if isinstance(value, dict)}
+            if isinstance(states, dict)
+            else {}
+        )
+        return self.approval_store.reconcile_for_rewind(
+            session_id=self.session_id,
+            checkpoint_id=checkpoint.checkpoint_id,
+            checkpoint_created_at=checkpoint.created_at,
+            checkpoint_approvals=snapshots,
+            approval_ids={
+                approval.approval_id
+                for approval in self.approval_store.list(status=None)
+                if approval.session_id == self.session_id and self._approval_on_active_head(approval)
+            },
+        )
 
     def _emit_checkpoint_created(
         self,

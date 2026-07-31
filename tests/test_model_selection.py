@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -11,6 +12,7 @@ import urllib.error
 import urllib.request
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -27,19 +29,21 @@ class ModelProviderSelectionTests(unittest.TestCase):
     def test_sdk_selects_deepseek_defaults_and_replaces_generation_options(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             workspace = Path(raw)
-            sdk.configure_model_provider(
-                workspace,
-                "openai_compatible",
-                model="relay-model",
-                base_url="https://relay.example/v1",
-                api_key_env="RELAY_API_KEY",
-                temperature=0.8,
-                max_tokens=1024,
-            )
+            user_config = workspace / "user-config.json"
+            with patch.dict(os.environ, {"CODEMUSE_USER_CONFIG_PATH": str(user_config)}, clear=False):
+                sdk.configure_model_provider(
+                    workspace,
+                    "openai_compatible",
+                    model="relay-model",
+                    base_url="https://relay.example/v1",
+                    api_key_env="RELAY_API_KEY",
+                    temperature=0.8,
+                    max_tokens=1024,
+                )
 
-            snapshot = sdk.configure_model_provider(workspace, "deepseek")
+                snapshot = sdk.configure_model_provider(workspace, "deepseek")
             model = snapshot["config"]["model"]
-            project = snapshot["project_config"]["model"]
+            user = snapshot["user_config"]["model"]
 
             self.assertEqual(model["provider"], "deepseek")
             self.assertEqual(model["model"], "deepseek-chat")
@@ -47,33 +51,35 @@ class ModelProviderSelectionTests(unittest.TestCase):
             self.assertEqual(model["api_key_env"], "DEEPSEEK_API_KEY")
             self.assertEqual(model["temperature"], 0.2)
             self.assertIsNone(model["max_tokens"])
-            self.assertNotIn("max_tokens", project)
+            self.assertIsNone(user["max_tokens"])
+            self.assertFalse((workspace / ".codemuse" / "config.json").exists())
 
     def test_cli_models_use_persists_custom_openai_compatible_gateway(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             workspace = Path(raw)
-
-            output = _run_cli(
-                [
-                    "models",
-                    "use",
-                    "openai_compatible",
-                    "--model",
-                    "gpt-5.5",
-                    "--base-url",
-                    "https://relay.example/v1",
-                    "--api-key-env",
-                    "CODEMUSE_API_KEY",
-                    "--temperature",
-                    "0.4",
-                    "--max-tokens",
-                    "2048",
-                    "--json",
-                    "--workspace",
-                    str(workspace),
-                ],
-                default_workspace=workspace,
-            )
+            user_config = workspace / "user-config.json"
+            with patch.dict(os.environ, {"CODEMUSE_USER_CONFIG_PATH": str(user_config)}, clear=False):
+                output = _run_cli(
+                    [
+                        "models",
+                        "use",
+                        "openai_compatible",
+                        "--model",
+                        "gpt-5.5",
+                        "--base-url",
+                        "https://relay.example/v1",
+                        "--api-key-env",
+                        "CODEMUSE_API_KEY",
+                        "--temperature",
+                        "0.4",
+                        "--max-tokens",
+                        "2048",
+                        "--json",
+                        "--workspace",
+                        str(workspace),
+                    ],
+                    default_workspace=workspace,
+                )
             model = json.loads(output)["config"]["model"]
 
             self.assertEqual(model["provider"], "openai_compatible")
@@ -86,39 +92,41 @@ class ModelProviderSelectionTests(unittest.TestCase):
     def test_http_model_selection_is_atomic_and_rejects_raw_key_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             workspace = Path(raw)
-            server = CodeMuseServer(("127.0.0.1", 0), WebSessionManager(default_workspace=workspace))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                base = f"http://127.0.0.1:{server.server_address[1]}"
-                selected = _json_request(
-                    f"{base}/api/models/select",
-                    method="POST",
-                    payload={
-                        "provider": "deepseek",
-                        "model": "deepseek-reasoner",
-                        "max_tokens": 4096,
-                    },
-                )
-
-                model = selected["config"]["model"]
-                self.assertEqual(model["provider"], "deepseek")
-                self.assertEqual(model["model"], "deepseek-reasoner")
-                self.assertEqual(model["max_tokens"], 4096)
-                self.assertEqual(model["temperature"], 0.2)
-
-                with self.assertRaises(urllib.error.HTTPError) as raised:
-                    _json_request(
+            user_config = workspace / "user-config.json"
+            with patch.dict(os.environ, {"CODEMUSE_USER_CONFIG_PATH": str(user_config)}, clear=False):
+                server = CodeMuseServer(("127.0.0.1", 0), WebSessionManager(default_workspace=workspace))
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base = f"http://127.0.0.1:{server.server_address[1]}"
+                    selected = _json_request(
                         f"{base}/api/models/select",
                         method="POST",
-                        payload={"provider": "deepseek", "api_key": "not-an-environment-variable"},
+                        payload={
+                            "provider": "deepseek",
+                            "model": "deepseek-reasoner",
+                            "max_tokens": 4096,
+                        },
                     )
-                self.assertEqual(raised.exception.code, 400)
-                raised.exception.close()
-            finally:
-                server.shutdown()
-                server.server_close()
-                thread.join(timeout=3)
+
+                    model = selected["config"]["model"]
+                    self.assertEqual(model["provider"], "deepseek")
+                    self.assertEqual(model["model"], "deepseek-reasoner")
+                    self.assertEqual(model["max_tokens"], 4096)
+                    self.assertEqual(model["temperature"], 0.2)
+
+                    with self.assertRaises(urllib.error.HTTPError) as raised:
+                        _json_request(
+                            f"{base}/api/models/select",
+                            method="POST",
+                            payload={"provider": "deepseek", "api_key": "not-an-environment-variable"},
+                        )
+                    self.assertEqual(raised.exception.code, 400)
+                    raised.exception.close()
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=3)
 
     def test_api_key_env_rejects_raw_api_key_text(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -129,7 +137,7 @@ class ModelProviderSelectionTests(unittest.TestCase):
                     api_key_env="sk-this-is-a-raw-key",
                 )
 
-            with self.assertRaisesRegex(ValueError, "environment variable name"):
+            with self.assertRaisesRegex(ValueError, "Workspace configuration cannot set"):
                 sdk.set_config_path(
                     Path(raw),
                     "model.api_key_env",

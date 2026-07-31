@@ -1,6 +1,7 @@
 """Bounded workflow orchestration for explicit multi-agent requests."""
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -21,14 +22,22 @@ def workflow_nodes(workflow: str, *, allow_edits: bool = False) -> list[TaskNode
             TaskNode("review", "change-reviewer", "Review current changes and risks."),
         ]
     if workflow == "code_change":
-        return [
+        nodes = [
             TaskNode("memory", "memory-scout", "Find relevant remembered context."),
             TaskNode("repo", "repo-researcher", "Inspect implementation paths."),
             TaskNode("api", "api-scout", "Trace interfaces and call sites."),
             TaskNode("plan", "implementation-planner", "Turn research into a minimal plan.", ["memory", "repo", "api"]),
-            TaskNode("patch", "code-worker", "Prepare scoped edits in an isolated worktree.", ["plan"], allow_edits=allow_edits),
-            TaskNode("review", "change-reviewer", "Review the staged result.", ["patch"]),
         ]
+        if allow_edits:
+            nodes.extend(
+                [
+                    TaskNode("patch", "code-worker", "Prepare scoped edits in an isolated worktree.", ["plan"], allow_edits=True),
+                    TaskNode("review", "change-reviewer", "Review the staged result.", ["patch"]),
+                ]
+            )
+        else:
+            nodes.append(TaskNode("review", "change-reviewer", "Review the implementation plan and risks.", ["plan"]))
+        return nodes
     return [
         TaskNode("memory", "memory-scout", "Find relevant remembered context."),
         TaskNode("repo", "repo-researcher", "Inspect relevant repository paths."),
@@ -48,15 +57,10 @@ class SubAgentOrchestrator:
         blackboard = Blackboard()
         run_id = uuid.uuid4().hex[:12]
         steps: list[dict[str, Any]] = []
-        budget = max(1, min(int(max_agents or 1), 8))
-        if workflow == "code_change" and allow_edits:
-            budget = max(budget, 6)
+        max_workers = max(1, min(int(max_agents or 1), 4))
         for batch in graph.batches():
-            runnable = batch[:budget]
-            if not runnable:
-                break
             runnable = [
-                node for node in runnable
+                node for node in batch
                 if all((blackboard.get(dep) is None or blackboard.get(dep).status == "completed") for dep in node.depends_on)
             ]
             if not runnable:
@@ -65,6 +69,17 @@ class SubAgentOrchestrator:
             def execute(node: TaskNode) -> tuple[TaskNode, dict[str, Any]]:
                 context = blackboard.dependency_context(node.depends_on)
                 task = f"Goal: {goal}\nRole: {node.objective}\nDependency reports: {context}"
+                review_artifact = _dependency_artifact(context) if node.node_id == "review" else None
+                if review_artifact is not None:
+                    patch_text = Path(str(review_artifact["patch_path"])).read_text(encoding="utf-8", errors="replace")
+                    task += (
+                        "\nReview the actual staged patch and changed files. Report regressions, missing tests, and risks."
+                        "\nFinish with exactly one decision line: `REVIEW_DECISION: approved` or "
+                        "`REVIEW_DECISION: rejected`. Only the exact approved decision can release the artifact; "
+                        "a missing or malformed decision is treated as rejected."
+                        f"\nPatch artifact metadata: {json.dumps(review_artifact, ensure_ascii=False)}"
+                        f"\nPatch:\n{patch_text[:20000]}"
+                    )
                 started = time.time()
                 attempts = 2 if node.node_id == "patch" and node.allow_edits else 1
                 last_error = ""
@@ -82,8 +97,27 @@ class SubAgentOrchestrator:
                             if artifact is None:
                                 raise RuntimeError("code-worker completed without producing a worktree diff")
                         else:
-                            result = self.manager.run_sync(spec_name=node.agent, task=task)
+                            review_workspace = Path(str(review_artifact["worktree_path"])) if review_artifact is not None else None
+                            result = self.manager.run_sync(spec_name=node.agent, task=task, tool_workspace=review_workspace)
                             payload = result.to_dict()
+                            if review_artifact is not None:
+                                worktrees = WorktreeManager(self.workspace)
+                                artifact = worktrees.load_artifact(str(review_artifact["artifact_id"]))
+                                decision = _review_decision(result.summary)
+                                approved = (
+                                    result.status == "completed"
+                                    and decision == "approved"
+                                    and worktrees.apply_check(artifact)
+                                )
+                                worktrees.record_review(artifact, approved=approved, summary=result.summary)
+                                payload["review"] = {
+                                    "artifact_id": artifact.artifact_id,
+                                    "approved": approved,
+                                    "decision": decision or "missing",
+                                    "summary": result.summary,
+                                }
+                                if not approved:
+                                    payload["status"] = "failed"
                         payload.update({"node_id": node.node_id, "attempt": attempt, "duration_ms": int((time.time() - started) * 1000)})
                         return node, payload
                     except Exception as exc:  # noqa: BLE001
@@ -91,18 +125,23 @@ class SubAgentOrchestrator:
                 return node, {"node_id": node.node_id, "spec_name": node.agent, "status": "failed", "summary": last_error, "error": last_error, "attempt": attempts}
 
             if len(runnable) > 1:
-                with ThreadPoolExecutor(max_workers=min(4, len(runnable)), thread_name_prefix="codemuse-orchestration") as executor:
+                with ThreadPoolExecutor(max_workers=min(max_workers, len(runnable)), thread_name_prefix="codemuse-orchestration") as executor:
                     results = list(executor.map(execute, runnable))
             else:
                 results = [execute(runnable[0])]
             for node, payload in results:
                 status = "completed" if payload.get("status") == "completed" else "failed"
                 graph.mark(node.node_id, "completed" if status == "completed" else "failed")
-                manifest = AgentManifest(node.agent, status, str(payload.get("summary") or ""), findings=list(payload.get("findings") or []))
+                artifact_payload = payload.get("artifact")
+                manifest = AgentManifest(
+                    node.agent,
+                    status,
+                    str(payload.get("summary") or ""),
+                    findings=list(payload.get("findings") or []),
+                    artifacts=[dict(artifact_payload)] if isinstance(artifact_payload, dict) else [],
+                )
                 blackboard.put(node.node_id, manifest)
                 steps.append(payload)
-            budget -= len(runnable)
-
         artifact_info = next((step.get("artifact") for step in steps if step.get("artifact")), None)
         success = bool(steps) and all(step.get("status") == "completed" for step in steps)
         return {
@@ -110,12 +149,38 @@ class SubAgentOrchestrator:
             "goal": goal,
             "workflow": workflow,
             "success": success,
-            "parallel": workflow != "code_change",
+            "parallel": max_workers > 1 and any(len(batch) > 1 for batch in graph.batches()),
+            "max_concurrency": max_workers,
+            "execution_mode": "isolated_worktree" if workflow == "code_change" and allow_edits else "read_only",
             "steps": steps,
             "blackboard": blackboard.to_dict(),
             "artifact": artifact_info,
             "summary": "\n".join(str(step.get("summary") or "") for step in steps[-2:]),
         }
+
+
+def _dependency_artifact(context: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for dependency in context:
+        artifacts = dependency.get("artifacts")
+        if isinstance(artifacts, list):
+            for artifact in artifacts:
+                if isinstance(artifact, dict) and artifact.get("artifact_id"):
+                    return artifact
+    return None
+
+
+def _review_decision(summary: str) -> str | None:
+    """Accept one explicit, machine-checkable reviewer decision and fail closed."""
+    decisions = [
+        line
+        for line in str(summary).splitlines()
+        if line.startswith("REVIEW_DECISION:")
+    ]
+    if decisions == ["REVIEW_DECISION: approved"]:
+        return "approved"
+    if decisions == ["REVIEW_DECISION: rejected"]:
+        return "rejected"
+    return None
 
 
 __all__ = ["SubAgentOrchestrator", "workflow_nodes"]

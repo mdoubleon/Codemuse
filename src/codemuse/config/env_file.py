@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 
 
+TRUST_WORKSPACE_ENV_ENV = "CODEMUSE_TRUST_WORKSPACE_ENV"
+
+
 def load_env_file(path: Path) -> list[str]:
     """Load missing environment variables from *path* and return their names.
 
@@ -30,6 +33,11 @@ def load_env_file(path: Path) -> list[str]:
         os.environ[key] = _strip_env_value(value.strip())
         loaded.append(key)
     return loaded
+
+
+def workspace_env_is_trusted() -> bool:
+    """Return whether an explicitly trusted workspace may supply a ``.env`` file."""
+    return os.getenv(TRUST_WORKSPACE_ENV_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _strip_env_value(value: str) -> str:

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import queue
 import shlex
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -112,8 +114,21 @@ class StdioMCPClient:
             raise ValueError(f"MCP stdio server has no command: {server.name}")
         command = [*shlex.split(server.command), *server.args]
         self.server = server
-        self._process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self._process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
         self._next_id = 0
+        self._request_lock = threading.RLock()
+        self._responses: queue.Queue[dict | BaseException | None] = queue.Queue()
+        self._reader = threading.Thread(
+            target=self._read_stdout,
+            name=f"codemuse-mcp-{server.name}",
+            daemon=True,
+        )
+        self._reader.start()
 
     def initialize(self) -> None:
         self._request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "codemuse", "version": "1"}})
@@ -143,40 +158,63 @@ class StdioMCPClient:
         return {"content": _content_text(result.get("messages")), "payload": result, "is_error": False}
 
     def close(self) -> None:
-        if self._process.poll() is None:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
+        with self._request_lock:
+            if self._process.poll() is None:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
 
     def _notify(self, method: str, params: dict) -> None:
         self._write({"jsonrpc": "2.0", "method": method, "params": params})
 
     def _request(self, method: str, params: dict) -> dict:
-        self._next_id += 1
-        request_id = self._next_id
-        self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
-        if self._process.stdout is None:
-            raise RuntimeError("MCP stdio stdout is unavailable")
-        deadline = time.time() + max(1, self.server.timeout_seconds)
-        while time.time() < deadline:
-            line = self._process.stdout.readline()
-            if not line:
-                raise RuntimeError(f"MCP stdio process exited: {self.server.name}")
-            payload = json.loads(line.decode("utf-8"))
-            if payload.get("id") != request_id:
-                continue
-            if payload.get("error"):
-                raise RuntimeError(str(payload["error"]))
-            return dict(payload.get("result") or {})
-        raise TimeoutError(f"MCP request timed out: {self.server.name}/{method}")
+        with self._request_lock:
+            self._next_id += 1
+            request_id = self._next_id
+            self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+            deadline = time.monotonic() + max(1, self.server.timeout_seconds)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"MCP request timed out: {self.server.name}/{method}")
+                try:
+                    payload = self._responses.get(timeout=remaining)
+                except queue.Empty as exc:
+                    raise TimeoutError(f"MCP request timed out: {self.server.name}/{method}") from exc
+                if payload is None:
+                    raise RuntimeError(f"MCP stdio process exited: {self.server.name}")
+                if isinstance(payload, BaseException):
+                    raise RuntimeError(f"MCP stdio response error: {payload}") from payload
+                if payload.get("id") != request_id:
+                    continue
+                if payload.get("error"):
+                    raise RuntimeError(str(payload["error"]))
+                return dict(payload.get("result") or {})
 
     def _write(self, payload: dict) -> None:
         if self._process.stdin is None:
             raise RuntimeError("MCP stdio stdin is unavailable")
         self._process.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         self._process.stdin.flush()
+
+    def _read_stdout(self) -> None:
+        if self._process.stdout is None:
+            self._responses.put(RuntimeError("MCP stdio stdout is unavailable"))
+            return
+        try:
+            while True:
+                line = self._process.stdout.readline()
+                if not line:
+                    self._responses.put(None)
+                    return
+                try:
+                    self._responses.put(json.loads(line.decode("utf-8")))
+                except Exception as exc:  # noqa: BLE001 - surface malformed protocol responses
+                    self._responses.put(exc)
+        except Exception as exc:  # noqa: BLE001 - reader failures unblock the request wait
+            self._responses.put(exc)
 
 
 class HTTPMCPClient:
@@ -293,34 +331,50 @@ class MCPSessionManager:
     def __init__(self) -> None:
         """注入该管理器需要协调的配置、注册表或存储依赖。"""
         self._sessions: dict[str, MCPSession] = {}
+        self._lock = threading.RLock()
 
     def get_or_create(self, server: MCPServerConfig) -> MCPSession:
         """按 server 名称获取或创建 MCP 会话。"""
-        session = self._sessions.get(server.name)
-        if session is not None:
-            session.touch(time.time())
+        with self._lock:
+            session = self._sessions.get(server.name)
+            if session is not None:
+                session.touch(time.time())
+                return session
+            if server.transport == "mock":
+                client = MockMCPClient(server)
+            elif server.transport == "stdio":
+                client = StdioMCPClient(server)
+            elif server.transport in {"http", "streamable_http", "sse"}:
+                client = HTTPMCPClient(server)
+            else:
+                raise ValueError(f"Unsupported MCP transport: {server.transport}")
+            client.initialize()
+            session = MCPSession(server=server, client=client, last_used_at=time.time())
+            self._sessions[server.name] = session
             return session
-        if server.transport == "mock":
-            client = MockMCPClient(server)
-        elif server.transport == "stdio":
-            client = StdioMCPClient(server)
-        elif server.transport in {"http", "streamable_http", "sse"}:
-            client = HTTPMCPClient(server)
-        else:
-            raise ValueError(f"Unsupported MCP transport: {server.transport}")
-        client.initialize()
-        session = MCPSession(server=server, client=client, last_used_at=time.time())
-        self._sessions[server.name] = session
-        return session
 
     def close_all_sessions(self) -> list[str]:
         """关闭管理器中缓存的所有 MCP session。"""
-        closed: list[str] = []
-        for name, session in list(self._sessions.items()):
-            session.client.close()
-            del self._sessions[name]
-            closed.append(name)
-        return closed
+        with self._lock:
+            closed: list[str] = []
+            for name, session in list(self._sessions.items()):
+                session.client.close()
+                del self._sessions[name]
+                closed.append(name)
+            return closed
+
+    def close_idle_sessions(self, idle_timeout: int, *, now: float | None = None) -> list[str]:
+        """Close sessions that have not been used within the configured window."""
+        current = time.time() if now is None else now
+        with self._lock:
+            closed: list[str] = []
+            for name, session in list(self._sessions.items()):
+                if current - session.last_used_at < max(1, idle_timeout):
+                    continue
+                session.client.close()
+                del self._sessions[name]
+                closed.append(name)
+            return closed
 
 
 def _safe_format(template: str, arguments: dict) -> str:

@@ -92,7 +92,7 @@ class ApprovalSafetyTests(unittest.TestCase):
             self.assertEqual(len(llm.calls), 1)
             self.assertEqual(agent.state.phase, "awaiting_approval")
             self.assertTrue(any(event.type == "tool_result" and event.tool_name == "list_files" for event in events))
-            with self.assertRaisesRegex(RuntimeError, "pending tool approvals"):
+            with self.assertRaisesRegex(RuntimeError, "unresolved approvals"):
                 agent.prompt("do not interrupt the pending batch")
 
             approvals_by_path = {str(item.arguments["path"]): item for item in approvals}

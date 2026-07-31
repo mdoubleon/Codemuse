@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
 IGNORED_SNAPSHOT_DIRS = {".git", ".data", "__pycache__", ".venv", "node_modules", "dist", "build"}
+MAX_SNAPSHOT_FILES = 20_000
+MAX_SNAPSHOT_BYTES = 1024 * 1024 * 1024
 
 
 class WorkspaceSnapshotManager:
@@ -32,13 +36,19 @@ class WorkspaceSnapshotManager:
         files: list[dict[str, Any]] = []
         total_bytes = 0
         for source in sorted(self.workspace.rglob("*")):
-            if not source.is_file() or self._is_ignored(source):
+            if self._is_ignored(source):
+                continue
+            if source.is_symlink():
+                raise PermissionError(f"Refusing to snapshot symbolic link: {source.relative_to(self.workspace)}")
+            if not source.is_file():
                 continue
             relative_path = source.relative_to(self.workspace).as_posix()
+            size = source.stat().st_size
+            if len(files) + 1 > MAX_SNAPSHOT_FILES or total_bytes + size > MAX_SNAPSHOT_BYTES:
+                raise RuntimeError("Workspace snapshot exceeds the configured file or byte limit")
             target = files_dir / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-            size = source.stat().st_size
             total_bytes += size
             files.append(
                 {
@@ -49,16 +59,25 @@ class WorkspaceSnapshotManager:
             )
 
         git_metadata = self._git_metadata()
+        checkpoint_commit = self._commit_snapshot(files_dir, checkpoint_id)
+        if checkpoint_commit:
+            git_metadata = {**git_metadata, "checkpoint_commit": checkpoint_commit}
         manifest = {
             "checkpoint_id": checkpoint_id,
-            "kind": "git_workspace_snapshot" if git_metadata.get("available") else "workspace_snapshot",
+            "kind": "git_checkpoint" if checkpoint_commit else "workspace_snapshot",
             "files_count": len(files),
             "total_bytes": total_bytes,
             "files": files,
         }
         if git_metadata.get("available"):
             manifest["git"] = git_metadata
-        (snapshot_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        manifest_path = snapshot_dir / "manifest.json"
+        temporary_manifest = snapshot_dir / f".{manifest_path.name}.tmp"
+        with temporary_manifest.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(manifest, ensure_ascii=False, indent=2))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_manifest, manifest_path)
         return {
             "kind": manifest["kind"],
             "files_count": len(files),
@@ -76,28 +95,36 @@ class WorkspaceSnapshotManager:
         manifest = self._load_manifest(checkpoint_id)
         files_dir = self._snapshot_dir(checkpoint_id) / "files"
         snapshot_paths = {str(item["relative_path"]) for item in manifest.get("files", [])}
-
+        self._validate_snapshot_files(manifest, files_dir)
+        rollback_dir = Path(tempfile.mkdtemp(prefix=f"rewind-{checkpoint_id}-", dir=self.snapshot_root))
+        rollback_files = self._backup_workspace(rollback_dir)
         removed_files: list[str] = []
         restored_files: list[str] = []
-        for current in sorted(self.workspace.rglob("*"), reverse=True):
-            if not current.is_file() or self._is_ignored(current):
-                continue
-            relative_path = current.relative_to(self.workspace).as_posix()
-            if relative_path in snapshot_paths:
-                continue
-            self._assert_inside_workspace(current)
-            current.unlink()
-            removed_files.append(relative_path)
+        try:
+            for current in sorted(self.workspace.rglob("*"), reverse=True):
+                if not current.is_file() or self._is_ignored(current):
+                    continue
+                relative_path = current.relative_to(self.workspace).as_posix()
+                if relative_path in snapshot_paths:
+                    continue
+                self._assert_inside_workspace(current)
+                current.unlink()
+                removed_files.append(relative_path)
 
-        for item in manifest.get("files", []):
-            relative_path = str(item["relative_path"])
-            source = files_dir / relative_path
-            target = self._workspace_file(relative_path)
-            if not source.exists():
-                raise FileNotFoundError(f"Snapshot file missing: {relative_path}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            restored_files.append(relative_path)
+            for item in manifest.get("files", []):
+                relative_path = str(item["relative_path"])
+                source = files_dir / relative_path
+                target = self._workspace_file(relative_path)
+                if target.is_symlink():
+                    raise PermissionError(f"Refusing to overwrite symbolic link during rewind: {relative_path}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                restored_files.append(relative_path)
+        except Exception:
+            self._restore_backup(rollback_dir, rollback_files)
+            raise
+        finally:
+            shutil.rmtree(rollback_dir, ignore_errors=True)
 
         self._prune_empty_dirs()
         return {
@@ -130,12 +157,85 @@ class WorkspaceSnapshotManager:
             "current_git": self._git_metadata(),
         }
 
+    def _validate_snapshot_files(self, manifest: dict[str, Any], files_dir: Path) -> None:
+        for item in manifest.get("files", []):
+            relative_path = str(item.get("relative_path") or "")
+            source = (files_dir / relative_path).resolve()
+            files_root = files_dir.resolve()
+            if files_root not in source.parents:
+                raise PermissionError(f"Snapshot manifest path escapes files root: {relative_path}")
+            if not source.is_file() or source.is_symlink():
+                raise FileNotFoundError(f"Snapshot file missing or unsafe: {relative_path}")
+            expected_size = int(item.get("size") or 0)
+            expected_hash = str(item.get("sha256") or "")
+            if source.stat().st_size != expected_size or _sha256_file(source) != expected_hash:
+                raise RuntimeError(f"Snapshot file failed integrity validation: {relative_path}")
+            target = self.workspace / relative_path
+            if target.is_symlink():
+                raise PermissionError(f"Workspace target is a symbolic link: {relative_path}")
+            self._workspace_file(relative_path)
+
+    def _backup_workspace(self, destination: Path) -> list[str]:
+        paths: list[str] = []
+        for source in sorted(self.workspace.rglob("*")):
+            if self._is_ignored(source):
+                continue
+            if source.is_symlink():
+                raise PermissionError(f"Refusing transactional rewind with symbolic link: {source.relative_to(self.workspace)}")
+            if not source.is_file():
+                continue
+            relative_path = source.relative_to(self.workspace).as_posix()
+            target = destination / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            paths.append(relative_path)
+        return paths
+
+    def _restore_backup(self, backup_dir: Path, backup_files: list[str]) -> None:
+        for current in sorted(self.workspace.rglob("*"), reverse=True):
+            if current.is_file() and not self._is_ignored(current):
+                current.unlink()
+        for relative_path in backup_files:
+            source = backup_dir / relative_path
+            target = self._workspace_file(relative_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+    @staticmethod
+    def _commit_snapshot(files_dir: Path, checkpoint_id: str) -> str:
+        if shutil.which("git") is None:
+            return ""
+        commands = [
+            ["git", "init", "--quiet"],
+            ["git", "add", "-A"],
+            [
+                "git", "-c", "user.name=codemuse", "-c", "user.email=codemuse@example.invalid",
+                "commit", "--quiet", "--allow-empty", "-m", f"CodeMuse checkpoint {checkpoint_id}",
+            ],
+        ]
+        for command in commands:
+            result = subprocess.run(command, cwd=files_dir, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                return ""
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=files_dir, capture_output=True, text=True, check=False)
+        return (result.stdout or "").strip() if result.returncode == 0 else ""
+
     def _load_manifest(self, checkpoint_id: str) -> dict[str, Any]:
         """读取指定 checkpoint 的 workspace manifest。"""
         manifest_path = self._snapshot_dir(checkpoint_id) / "manifest.json"
         if not manifest_path.exists():
             raise FileNotFoundError(f"Workspace snapshot not found for checkpoint: {checkpoint_id}")
-        return json.loads(manifest_path.read_text(encoding="utf-8"))
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid workspace snapshot manifest: {checkpoint_id}") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError(f"Workspace snapshot manifest must be an object: {checkpoint_id}")
+        if str(manifest.get("checkpoint_id") or "") != checkpoint_id:
+            raise ValueError(f"Workspace snapshot does not match checkpoint: {checkpoint_id}")
+        if not isinstance(manifest.get("files"), list):
+            raise ValueError(f"Workspace snapshot manifest has no file list: {checkpoint_id}")
+        return manifest
 
     def _snapshot_dir(self, checkpoint_id: str) -> Path:
         """计算 checkpoint 快照目录。"""

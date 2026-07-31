@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+_METADATA_SCAN_CHARS = 16_384
+
+
 @dataclass(frozen=True)
 class SkillSearchRoot:
     """定义 SkillSearchRoot的结构化数据。"""
@@ -64,7 +67,9 @@ def load_skills(workspace: Path, *, search_roots: list[SkillSearchRoot] | None =
 
 def _parse_skill_descriptor(path: Path, root: SkillSearchRoot) -> SkillDescriptor:
     """解析Skill描述符。"""
-    rows = path.read_text(encoding="utf-8-sig").splitlines()
+    # Discovery reads only a bounded header. The complete body is loaded only
+    # after a skill is actually activated for a task.
+    rows = _read_prefix(path, _METADATA_SCAN_CHARS).splitlines()
     metadata = _frontmatter(rows)
     if metadata is None:
         metadata = _fallback_metadata(path, rows)
@@ -78,6 +83,21 @@ def _parse_skill_descriptor(path: Path, root: SkillSearchRoot) -> SkillDescripto
         precedence=root.precedence,
         discovery_mode="codemuse_project_directory",
     )
+
+
+def read_skill_body(path: Path, *, max_chars: int) -> tuple[str, bool]:
+    """Read a bounded skill body without materializing the whole file."""
+    if max_chars < 1:
+        return "", False
+    content = _read_prefix(path, max_chars + 1)
+    if len(content) <= max_chars:
+        return content, False
+    return content[:max_chars], True
+
+
+def _read_prefix(path: Path, max_chars: int) -> str:
+    with path.open("r", encoding="utf-8-sig") as handle:
+        return handle.read(max_chars)
 
 
 def _frontmatter(rows: list[str]) -> dict[str, str] | None:

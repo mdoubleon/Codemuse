@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -10,6 +12,10 @@ from typing import Any
 
 from codemuse.domain.messages import ChatMessage
 from codemuse.runtime.state import QueuedMessage
+
+
+_LOCKS_GUARD = threading.Lock()
+_SESSION_LOCKS: dict[str, threading.RLock] = {}
 
 
 @dataclass
@@ -27,6 +33,7 @@ class SessionRecord:
     queued_messages: list[QueuedMessage] = field(default_factory=list)
     active_head_id: str | None = None
     turns: list[dict[str, Any]] = field(default_factory=list)
+    head_messages: dict[str, list[ChatMessage]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """规范化树关系，让旧版记录自动成为根节点。"""
@@ -52,6 +59,10 @@ class SessionRecord:
             "queued_messages": [message.__dict__ for message in self.queued_messages],
             "active_head_id": self.active_head_id,
             "turns": list(self.turns),
+            "head_messages": {
+                head_id: [message.to_dict() for message in messages]
+                for head_id, messages in self.head_messages.items()
+            },
         }
 
     @classmethod
@@ -70,6 +81,11 @@ class SessionRecord:
             queued_messages=[QueuedMessage(text=str(item.get("text") or ""), delivery=str(item.get("delivery") or "follow_up")) for item in (payload.get("queued_messages") if isinstance(payload.get("queued_messages"), list) else []) if isinstance(item, dict) and str(item.get("text") or "").strip()],
             active_head_id=str(payload["active_head_id"]) if payload.get("active_head_id") else None,
             turns=[dict(item) for item in (payload.get("turns") if isinstance(payload.get("turns"), list) else []) if isinstance(item, dict)],
+            head_messages={
+                str(head_id): [ChatMessage.from_dict(item) for item in messages if isinstance(item, dict)]
+                for head_id, messages in (payload.get("head_messages") if isinstance(payload.get("head_messages"), dict) else {}).items()
+                if isinstance(messages, list)
+            },
         )
 
 
@@ -100,6 +116,7 @@ class SessionStore:
             queued_messages=[QueuedMessage(item.text, item.delivery) for item in parent.queued_messages],
             active_head_id=parent.active_head_id,
             turns=[dict(item) for item in parent.turns],
+            head_messages=_copy_head_messages(parent.head_messages),
         )
 
     def fork_from_head(self, parent_session_id: str, head_id: str) -> SessionRecord:
@@ -108,12 +125,20 @@ class SessionStore:
         node = next((item for item in parent.turns if item.get("turn_node_id") == head_id), None)
         if node is None:
             raise ValueError(f"Unknown turn head: {head_id}")
-        message_count = max(0, min(len(parent.messages), int(node.get("message_count") or 0)))
         child = self.fork(parent_session_id)
-        child.messages = [ChatMessage.from_dict(message.to_dict()) for message in parent.messages[:message_count]]
-        child.turns = [dict(item) for item in parent.turns if float(item.get("started_at") or 0) <= float(node.get("started_at") or 0)]
+        messages = parent.head_messages.get(head_id)
+        if messages is None:
+            message_count = max(0, min(len(parent.messages), int(node.get("message_count") or 0)))
+            messages = parent.messages[:message_count]
+        child.messages = _copy_messages(messages)
+        child.turns = _turn_path(parent.turns, head_id)
+        child.head_messages = {
+            str(item["turn_node_id"]): _copy_messages(parent.head_messages[str(item["turn_node_id"])])
+            for item in child.turns
+            if str(item.get("turn_node_id") or "") in parent.head_messages
+        }
         child.active_head_id = head_id
-        child.forked_at_message = message_count
+        child.forked_at_message = len(child.messages)
         return child
 
     def set_active_head(self, session_id: str, head_id: str) -> SessionRecord:
@@ -122,24 +147,58 @@ class SessionStore:
         node = next((item for item in record.turns if item.get("turn_node_id") == head_id), None)
         if node is None:
             raise ValueError(f"Unknown turn head: {head_id}")
-        message_count = max(0, min(len(record.messages), int(node.get("message_count") or 0)))
-        record.messages = [ChatMessage.from_dict(message.to_dict()) for message in record.messages[:message_count]]
+        messages = record.head_messages.get(head_id)
+        if messages is None:
+            message_count = max(0, min(len(record.messages), int(node.get("message_count") or 0)))
+            messages = record.messages[:message_count]
+        record.messages = _copy_messages(messages)
         record.active_head_id = head_id
         self.save(record)
         return record
 
     def save(self, record: SessionRecord) -> None:
         """将对象写入本地存储。"""
-        record.updated_at = time.time()
-        path = self.root / f"{record.session_id}.json"
-        path.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        with self._session_lock(record.session_id):
+            record.updated_at = time.time()
+            self._capture_active_head(record)
+            path = self.root / f"{record.session_id}.json"
+            temporary = self.root / f".{record.session_id}.{uuid.uuid4().hex}.tmp"
+            payload = json.dumps(record.to_dict(), ensure_ascii=False, indent=2)
+            with temporary.open("w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
 
     def load(self, session_id: str) -> SessionRecord:
         """按标识读取本地存储中的对象。"""
         path = self.root / f"{session_id}.json"
         if not path.exists():
             raise FileNotFoundError(f"Session not found: {session_id}")
-        return SessionRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        with self._session_lock(session_id):
+            record = SessionRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            self._backfill_head_snapshots(record)
+            return record
+
+    def _capture_active_head(self, record: SessionRecord) -> None:
+        head_id = record.active_head_id
+        if head_id:
+            record.head_messages[head_id] = _copy_messages(record.messages)
+
+    @staticmethod
+    def _backfill_head_snapshots(record: SessionRecord) -> None:
+        """Best-effort migration for legacy message-count-only turn nodes."""
+        for node in record.turns:
+            head_id = str(node.get("turn_node_id") or "")
+            if not head_id or head_id in record.head_messages:
+                continue
+            message_count = max(0, min(len(record.messages), int(node.get("message_count") or 0)))
+            record.head_messages[head_id] = _copy_messages(record.messages[:message_count])
+
+    def _session_lock(self, session_id: str) -> threading.RLock:
+        key = str(self.root / session_id)
+        with _LOCKS_GUARD:
+            return _SESSION_LOCKS.setdefault(key, threading.RLock())
 
     def list(self) -> list[SessionRecord]:
         """列出当前存储或目录中的对象。"""
@@ -155,6 +214,30 @@ class SessionStore:
     def list_tree(self) -> list[dict[str, Any]]:
         """把持久化会话列成经过校验的嵌套森林。"""
         return build_session_tree([record.to_dict() for record in self.list()])
+
+
+def _copy_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
+    return [ChatMessage.from_dict(message.to_dict()) for message in messages]
+
+
+def _copy_head_messages(head_messages: dict[str, list[ChatMessage]]) -> dict[str, list[ChatMessage]]:
+    return {head_id: _copy_messages(messages) for head_id, messages in head_messages.items()}
+
+
+def _turn_path(turns: list[dict[str, Any]], head_id: str) -> list[dict[str, Any]]:
+    by_id = {str(item.get("turn_node_id") or ""): item for item in turns}
+    path: list[dict[str, Any]] = []
+    cursor: str | None = head_id
+    seen: set[str] = set()
+    while cursor and cursor not in seen:
+        seen.add(cursor)
+        node = by_id.get(cursor)
+        if node is None:
+            break
+        path.append(dict(node))
+        cursor = str(node.get("parent_head_id") or "") or None
+    path.reverse()
+    return path
 
 
 def build_session_tree(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:

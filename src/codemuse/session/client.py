@@ -17,8 +17,24 @@ class SessionClient:
         return self.session_id
 
     def resume(self, session_id: str) -> str:
-        self.session_id = sdk.create_runtime(self.workspace, session_id=session_id).session_id
+        self.session_id = str(sdk.resume_session(self.workspace, session_id)["session_id"])
         return self.session_id
+
+    def fork(self, *, head_id: str | None = None, switch_to_child: bool = False) -> dict[str, Any]:
+        if not self.session_id:
+            raise ValueError("No active session to fork.")
+        child = sdk.fork_session(self.workspace, self.session_id, head_id=head_id)
+        if switch_to_child:
+            self.session_id = str(child["session_id"])
+        return child
+
+    def branch(self, *, head_id: str | None = None, switch_to_child: bool = False) -> dict[str, Any]:
+        return self.fork(head_id=head_id, switch_to_child=switch_to_child)
+
+    def navigate(self, head_id: str) -> dict[str, Any]:
+        if not self.session_id:
+            raise ValueError("No active session to navigate.")
+        return sdk.navigate_session_head(self.workspace, self.session_id, head_id)
 
     def prompt(self, text: str, *, collect_events: bool = False) -> dict[str, Any]:
         payload = sdk.run(text, self.workspace, session_id=self.session_id, collect_events=collect_events)

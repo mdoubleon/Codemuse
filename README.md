@@ -83,7 +83,7 @@ python -m unittest discover -s tests
 
 默认情况下，CodeMuse 可以使用本地确定性 FakeLLM，方便离线测试和学习流程。
 
-复制 `.env.example` 为 `.env`。`scripts/run_agent.py` 和 `scripts/run_server.py` 都会加载它，且不会覆盖已存在的进程环境变量。
+复制 CodeMuse 自身目录中的 `.env.example` 为 `.env`。`scripts/run_agent.py` 和 `scripts/run_server.py` 只会加载这份 CodeMuse 自身的 `.env`，且不会覆盖已存在的进程环境变量；传入的 workspace `.env` 默认不会被读取。对外部仓库，请通过进程环境变量或用户级模型配置显式提供凭据。
 
 使用自定义 OpenAI-compatible 中转站（或官方 OpenAI endpoint）时：
 
@@ -107,25 +107,22 @@ CODEMUSE_PROVIDER=deepseek
 .codemuse/config.json
 ```
 
-只保存非密钥字段，例如：
+它只用于 workspace 级的非连接配置，例如 runtime 和 capability 开关。为防止陌生仓库改变环境密钥的投递目标，默认不会采用其中的 `model.provider`、`model.base_url` 或 `model.api_key_env`。模型连接由环境变量或用户级配置保存：
 
 ```json
 {
-  "model": {
-    "provider": "openai_compatible",
-    "base_url": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini",
-    "api_key_env": "CODEMUSE_API_KEY"
-  },
   "runtime": {
     "max_turns": 8,
     "max_tool_calls_per_turn": 4,
     "history_token_budget": 16000
+  },
+  "capabilities": {
+    "skills_enabled": true
   }
 }
 ```
 
-也可以通过 CLI 选择 Provider。选择命令一次性写入整个 `model` 配置块，便于保留中转站的模型、地址和环境变量名：
+也可以通过 CLI 选择 Provider。选择命令会写入用户级配置，而不是目标 workspace，便于在多个项目间安全复用中转站的模型、地址和环境变量名：
 
 ```powershell
 python scripts/run_agent.py models use openai_compatible `
@@ -279,4 +276,43 @@ external   调用外部能力
 ## 状态说明
 
 CodeMuse 已覆盖 pp-Echo 的核心 Coding Agent 能力面，并通过单元/集成测试、Web smoke、五步 demo 和 68-case baseline 验证。两者不是逐文件复制：CodeMuse 保留零第三方运行依赖、dataclass、JSON/JSONL 存储和更保守的浏览器/扩展执行边界；准确限制以 [docs/known-limitations.md](docs/known-limitations.md) 为准。
+
+## 多阶段执行与恢复
+
+CodeMuse 现在把“模型提出调用”和“真正产生副作用”拆成两个边界：
+
+```text
+LLM tool call
+-> Planner：schema 校验、Policy Gate、effect preview/digest、Plan
+-> Approval Queue：保存 plan_id 和精确 effect 合约
+-> Executor：再次校验后执行，记录 execution_id 和结果
+```
+
+- Planner 只生成经过参数校验和策略判定的 Plan，不直接执行工具；Executor 只接受已允许的计划调用，或队列中已批准的精确调用。
+- 需要审批的调用会保存参数、`effect_preview`、`effect_digest`、`plan_id` 和来源 turn head。批准时会再次校验 schema、当前 policy、digest、目标状态与分支归属；预览失效会标记为 `stale`，合约被破坏或 policy 变化会标记为 `invalid`。切到 sibling head 不会恢复或消费另一分支的待审批调用。
+- 审批执行状态为 `pending -> executing -> completed/failed`。`completed` 的后续批准请求只重放已持久化结果，不再次运行工具；`executing` 或 `failed` 不自动重试，必须先处理不确定结果并生成新计划。
+
+多 Agent 编排提供三个有界 workflow：
+
+- `research`：并行收集 memory、仓库和接口线索。
+- `debug`：补充测试与风险审查，聚焦定位故障原因。
+- `code_change`：先研究和规划，再在独立 Git worktree 中生成 patch，由 reviewer 复核；只有明确输出 `REVIEW_DECISION: approved` 的 artifact 才能进入下一步，且仍需单独审批 `apply_patch_artifact` 才会改动主工作区。
+
+`code_change` 的首次批准只允许隔离 worktree 执行，不等同于批准修改主工作区。`max_agents` 是并发上限，当前最多四个工作节点，并不是会静默跳过后续计划、patch 或 review 的总预算。
+
+会话同时保留会话树和 turn-head DAG：可以 `resume_session` 恢复、用 `branch_session`/`fork_session` 从当前或指定 head 分支、用 `navigate_session_head` 切换已保存 head。切回旧 head 不删除同级分支；从 rewind 后的会话继续对话会自然产生新分支。
+
+检查点保存会话状态与工作区快照，并记录 Git 元数据和快照内 commit。`preview_rewind` 会先显示影响；`rewind` 支持 `conversation_only`、`workspace_only` 或组合恢复，且要求 checkpoint 属于当前会话。会话回退会废止检查点后的当前分支审批；存在未决 `executing` 审批时拒绝回退。工作区恢复以带 SHA-256 manifest 的文件快照为准，不会对用户仓库执行 `git reset`；恢复时校验 checkpoint 身份、拒绝符号链接，并在失败时尝试还原事务备份。
+
+上下文分为三层：最近完整消息作为短期上下文，超预算历史由 compactor 压缩为中期摘要，项目文件与项目记忆作为长期检索上下文。内置 JSON 向量索引和 BM25 不依赖第三方包；安装可选依赖后可使用本地 Chroma 持久化索引：
+
+```powershell
+pip install -e ".[chroma]"
+```
+
+Chroma 使用本地确定性 hashed embedding，不下载外部 embedding 模型；它不可用或故障时会自动回退到内置本地索引。
+
+Skills 与 MCP 均按需激活。Skill 发现阶段只读取 `SKILL.md` 的有界元数据，命中描述或显式启用后才有界读取正文并注入当前 turn。MCP 默认 `lazy`，状态查看不会启动 stdio 进程或建立网络连接；MCP server 名必须唯一。运行时必须先通过需审批的 `mcp_activate`，其预览会绑定 server、transport、command/args、URL、timeout 和声明工具，配置变更后旧审批会失效，执行时只会激活与已校验预览一致的配置。
+
+模型连接配置默认来自用户级配置或进程环境，workspace 的 `.codemuse/config.json` 不能覆盖 provider、endpoint 或 `api_key_env`，且 workspace `.env` 默认不会被启动脚本读取。`mcp.json` 仍可声明外部 command 或 URL，但 Runtime 必须在精确审批后才能激活非 mock server。已审查的兼容 workspace 可以分别设置 `CODEMUSE_TRUST_WORKSPACE_MODEL_CONFIG=1` 与 `CODEMUSE_TRUST_WORKSPACE_ENV=1` 允许旧配置行为。当前没有 workspace trust 提示、配置签名或每仓库密钥隔离；处理不可信仓库时仍应使用受限环境，详见 [docs/safety.md](docs/safety.md) 与 [docs/known-limitations.md](docs/known-limitations.md)。
 

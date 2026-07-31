@@ -9,6 +9,9 @@ description = "CodeMuse: a coding agent that turns repositories into reusable pr
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+chroma = ["chromadb>=0.5,<2"]
+
 [project.scripts]
 codemuse = "codemuse.cli.main:main"
 

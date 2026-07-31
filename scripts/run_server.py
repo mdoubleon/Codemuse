@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from codemuse.config.env_file import load_env_file
+from codemuse.config.env_file import load_env_file, workspace_env_is_trusted
 from codemuse.server.http import run_server
 
 
@@ -26,7 +26,7 @@ def main() -> int:
     args = parser.parse_args()
     workspace = Path(args.workspace)
     _load_and_report_env(ROOT / ".env")
-    if workspace.resolve() != ROOT.resolve():
+    if workspace.resolve() != ROOT.resolve() and workspace_env_is_trusted():
         _load_and_report_env(workspace / ".env")
     run_server(host=args.host, port=args.port, workspace=workspace)
     return 0

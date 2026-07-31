@@ -221,7 +221,8 @@ def config_schema() -> dict[str, Any]:
                 "path": "model.provider",
                 "type": "string",
                 "default": "fake",
-                "description": "LLM provider name.",
+                "description": "LLM provider name. Workspace config cannot override connection settings.",
+                "workspace_writable": False,
             },
             {
                 "path": "model.model",
@@ -233,13 +234,15 @@ def config_schema() -> dict[str, Any]:
                 "path": "model.base_url",
                 "type": "string",
                 "default": "",
-                "description": "Base URL for OpenAI-compatible providers.",
+                "description": "Base URL for OpenAI-compatible providers; user, environment, or runtime only.",
+                "workspace_writable": False,
             },
             {
                 "path": "model.api_key_env",
                 "type": "string",
                 "default": "",
-                "description": "Environment variable name for live providers.",
+                "description": "Environment variable name for live providers; user, environment, or runtime only.",
+                "workspace_writable": False,
             },
             {
                 "path": "model.temperature",

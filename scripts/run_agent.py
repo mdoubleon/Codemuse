@@ -10,7 +10,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from codemuse.cli.main import main as cli_main
-from codemuse.config.env_file import load_env_file
+from codemuse.config.env_file import load_env_file, workspace_env_is_trusted
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,10 +21,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _load_local_env(argv: list[str]) -> None:
-    """Match server startup: ``.env`` augments, never overrides, process env."""
+    """Load CodeMuse's own env file and only trusted workspace env files."""
     workspace = _workspace_from_args(argv)
     paths = [ROOT / ".env"]
-    if workspace != ROOT:
+    if workspace != ROOT and workspace_env_is_trusted():
         paths.append(workspace / ".env")
     for path in paths:
         load_env_file(path)

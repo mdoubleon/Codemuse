@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from codemuse.memory.blueprint_memory import BlueprintStore
+from codemuse.memory.chroma_index import ChromaMemoryIndex
 from codemuse.memory.file_memory_bm25 import rank_bm25
 from codemuse.memory.file_memory_chunker import FileMemoryChunk, chunk_text
 from codemuse.memory.file_memory_search import search_file_memory
@@ -76,7 +77,18 @@ def retrieve_memory(
         index_path = root / ".data" / "codemuse" / "rag" / "vector_index.json"
         vector_index = FileMemoryVectorIndex(index_path)
         vector_index.load()
-        candidates.extend((chunk, score, "file_vector") for chunk, score in vector_index.search(query, limit=limit * 3))
+        try:
+            chroma_index = ChromaMemoryIndex(root / ".data" / "codemuse" / "rag" / "chroma")
+            if chroma_index.count() > 0:
+                vector_hits = chroma_index.search(query, limit=limit * 3)
+                vector_source = "file_chroma"
+            else:
+                vector_hits = vector_index.search(query, limit=limit * 3)
+                vector_source = "file_vector"
+        except Exception:  # Optional Chroma must never prevent local retrieval.
+            vector_hits = vector_index.search(query, limit=limit * 3)
+            vector_source = "file_vector"
+        candidates.extend((chunk, score, vector_source) for chunk, score in vector_hits)
         indexed_chunks = [record.chunk for record in vector_index.records]
         candidates.extend((chunk, score, "file_bm25") for chunk, score in rank_bm25(query, indexed_chunks, limit=limit * 3))
 

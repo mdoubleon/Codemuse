@@ -44,6 +44,52 @@ def build_tool_effect_preview(workspace: Path, tool_name: str, arguments: dict[s
             patch_text = Path(artifact.patch_path).read_text(encoding="utf-8")
             preview = build_apply_patch_effect_preview(workspace, {"patch": patch_text, "create_dirs": True})
             return {**preview, "kind": "apply_patch_artifact", "artifact_id": artifact.artifact_id, "changed_paths": artifact.changed_paths}
+        if tool_name == "orchestrate_code_change":
+            goal = str(arguments.get("goal") or "").strip()
+            max_agents = _bounded_int(arguments.get("max_agents"), default=4, minimum=1, maximum=4)
+            return {
+                "kind": "orchestrate_code_change",
+                "available": True,
+                "blocked": not bool(goal),
+                "reason": "goal is required" if not goal else "",
+                "goal": goal,
+                "workflow": "code_change",
+                "max_agents": max_agents,
+                "execution_boundary": "isolated_git_worktree",
+                "parent_workspace_mutated": False,
+                "review_required_before_apply": True,
+            }
+        if tool_name == "mcp_activate":
+            from codemuse.mcp.config import load_mcp_config
+
+            server_name = str(arguments.get("server") or "").strip()
+            document = load_mcp_config(workspace)
+            server = next((item for item in document.servers if item.name == server_name), None)
+            if server is None:
+                return {
+                    "kind": "mcp_activate",
+                    "available": False,
+                    "blocked": True,
+                    "reason": f"Configured MCP server was not found: {server_name or '<missing>'}",
+                    "server": server_name,
+                }
+            return {
+                "kind": "mcp_activate",
+                "available": True,
+                "blocked": False,
+                "reason": "",
+                "server": server.name,
+                "transport": server.transport,
+                "command": server.command or "",
+                "args": list(server.args),
+                "url": server.url or "",
+                "is_remote": server.is_remote,
+                "requires_auth": server.requires_auth,
+                "timeout_seconds": server.timeout_seconds,
+                "declared_tools": [tool.name for tool in server.tools],
+                "will_start_external_session": True,
+                "risk_level": "high",
+            }
         return None
     except Exception as exc:  # noqa: BLE001 - 预览失败也要返回给用户看，不能悄悄吞掉
         return {
@@ -61,7 +107,7 @@ def validate_tool_effect_preview(
     stored_preview: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """批准前重新生成预览并比较文件状态，避免用户按旧 diff 批准新文件。"""
-    if tool_name not in {"write_file", "apply_patch", "apply_patch_artifact", "replace_text", "run_shell", "web_fetch", "web_search", "browser_navigate"} or not stored_preview:
+    if tool_name not in {"write_file", "apply_patch", "apply_patch_artifact", "replace_text", "run_shell", "web_fetch", "web_search", "browser_navigate", "orchestrate_code_change", "mcp_activate"} or not stored_preview:
         return {"ok": True, "reason": "", "current_preview": None, "changed_fields": []}
     current_preview = build_tool_effect_preview(workspace, tool_name, arguments)
     if current_preview is None:
@@ -97,6 +143,31 @@ def validate_tool_effect_preview(
         ]
     elif tool_name == "web_search":
         changed_fields = [field for field in ["query", "mode", "provider", "endpoint", "blocked", "reason"] if stored_preview.get(field) != current_preview.get(field)]
+    elif tool_name == "orchestrate_code_change":
+        changed_fields = [
+            field
+            for field in ["goal", "max_agents", "workflow", "execution_boundary", "parent_workspace_mutated", "blocked", "reason"]
+            if stored_preview.get(field) != current_preview.get(field)
+        ]
+    elif tool_name == "mcp_activate":
+        changed_fields = [
+            field
+            for field in [
+                "server",
+                "transport",
+                "command",
+                "args",
+                "url",
+                "is_remote",
+                "requires_auth",
+                "timeout_seconds",
+                "declared_tools",
+                "will_start_external_session",
+                "blocked",
+                "reason",
+            ]
+            if stored_preview.get(field) != current_preview.get(field)
+        ]
     else:
         changed_fields = [
             field

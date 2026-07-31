@@ -36,7 +36,7 @@ codemuse/
 └── releases/             发布说明目录
 ```
 
-运行时数据写入 `.data/codemuse/`，本地配置可放在 `.codemuse/config.json`，真实 API Key 放在 `.env` 或进程环境变量中。这些目录和文件默认不提交。
+运行时数据写入 `.data/codemuse/`，workspace 配置可放在 `.codemuse/config.json`，真实 API Key 放在进程环境变量或 CodeMuse 用户级配置引用的环境变量中。这些目录和文件默认不提交。目标 workspace 的 `.env` 默认不会被启动脚本加载。
 
 ## 核心包职责
 
@@ -105,20 +105,21 @@ python -m unittest discover -s tests
 
 ## 模型配置
 
-`.codemuse/config.json` 保存非密钥配置：
+`.codemuse/config.json` 保存 workspace 级非密钥配置。默认情况下，其中的 `model.provider`、`model.base_url` 和 `model.api_key_env` 会被忽略，避免仓库配置改变已有环境密钥的投递目标：
 
 ```json
 {
-  "model": {
-    "provider": "openai_compatible",
-    "base_url": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini",
-    "api_key_env": "CODEMUSE_API_KEY"
+  "runtime": {
+    "max_turns": 8,
+    "history_token_budget": 16000
+  },
+  "capabilities": {
+    "mcp_enabled": false
   }
 }
 ```
 
-`.env` 或进程环境变量保存真实密钥。`scripts/run_agent.py` 和 `scripts/run_server.py` 都会加载 `.env`，但不会覆盖已存在的进程环境变量：
+进程环境变量保存真实密钥。`scripts/run_agent.py` 和 `scripts/run_server.py` 仅加载 CodeMuse 自身目录的 `.env`，不会自动读取目标 workspace 的 `.env`，也不会覆盖已存在的进程环境变量：
 
 ```env
 # 自定义 OpenAI-compatible 中转站
@@ -132,7 +133,7 @@ CODEMUSE_PROVIDER=openai_compatible
 # CODEMUSE_PROVIDER=deepseek
 ```
 
-也可通过 CLI 一次性选择并保存 Provider：
+也可通过 CLI 一次性选择并保存 Provider；连接配置写入用户级配置，而不是目标 workspace：
 
 ```powershell
 python scripts/run_agent.py models use openai_compatible `
@@ -171,3 +172,51 @@ python -m unittest discover -s tests
 - `.env`、`.codemuse/`、`.data/`、`.private_notes/` 不进入提交。
 - 生成报告只提交有意公开的示例。
 - 文档不包含本机绝对路径、真实 API Key、私有中转站地址或个人学习记录。
+
+## 多阶段 Runtime 约定
+
+高风险工具调用的正式链路如下，维护 Runtime 或新增工具时不得绕过其中任一边界：
+
+```text
+provider ToolCall
+-> Planner.create_plan()
+-> 参数 schema 校验
+-> ToolPolicyEvaluator（allow / ask / deny）
+-> effect preview + digest（ask）
+-> PendingApprovalStore
+-> Executor.execute() / Executor.execute_approved()
+-> ToolRegistry.execute()
+```
+
+`Planner` 位于 `runtime/planner.py`，负责把模型输出编译为 Plan；`Executor` 位于 `runtime/executor.py`，负责唯一的执行入口。新工具应在 `ToolSpec` 中声明 schema、permission domain 与副作用属性，并在需要审批时提供可复算的 effect preview。不要在 tool、adapter 或 HTTP 层直接调用 `ToolRegistry.execute()` 来规避 Plan、policy 或 approval。
+
+审批记录包含 `plan_id`、`effect_digest`、`effect_preview`、来源 head 和执行状态。批准边界会重做参数、policy、digest、预览与 head 归属校验；完成的审批只返回持久化结果，执行中或失败的审批不应由恢复逻辑自动重跑。涉及外部系统时，工具实现仍应尽可能使用业务侧幂等键，因为本地执行状态不能消除远端已部分完成的副作用。
+
+## 工作流、会话与回退
+
+`subagents/orchestrator.py` 定义受限的 `research`、`debug` 和 `code_change` workflow。前两类是只读研究；代码变更必须走 `orchestrate_code_change`，其副作用是创建并使用隔离 Git worktree。该 workflow 的 reviewer 必须输出唯一精确行 `REVIEW_DECISION: approved` 才能把 artifact 标为 `approved`；缺失、格式错误或 `rejected` 均会失败。之后 `apply_patch_artifact` 还要经过常规精确 effect 审批并通过 `git apply --check`，才能触及父工作区。
+
+会话记录在 `storage/sessions.py` 中保存 parent/root 关系、turn DAG、active head 和每个 head 的消息快照。SDK 对应入口为：
+
+```python
+resume_session(workspace, session_id)
+branch_session(workspace, parent_session_id, head_id=...)
+fork_session(workspace, parent_session_id, head_id=...)
+navigate_session_head(workspace, session_id, head_id)
+preview_rewind(workspace, checkpoint_id)
+rewind(workspace, checkpoint_id, mode="conversation_and_workspace")
+```
+
+切换 head 是视图与后续执行起点的切换，不会删除 sibling history。审批绑定其来源 head，切换到 sibling 后不会恢复、批准或拒绝另一分支的 pending approval；旧记录则按当前消息中的 tool call 归属兼容判断。checkpoint 会记录当时的 active head；会话 rewind 后恢复该 head，因此下一次 turn 会成为保留历史上的新分支。rewind 会废止检查点后的当前分支审批，并拒绝存在未决 `executing` 审批的恢复。Git checkpoint 的恢复源是受校验文件快照，Git 元数据用于审计和比对，并不执行 Git 历史重写。
+
+## 上下文与扩展的维护边界
+
+短期消息窗口、`ConversationCompactor` 的中期摘要、memory retrieval 的长期召回共同组成分层上下文。`memory/chroma_index.py` 是可选后端，依赖 `codemuse[chroma]`；必须保留 JSON 向量索引/BM25 fallback，并保证 Chroma 导入、构建或查询失败不会让主任务失败。
+
+Skill discovery 只扫描 `SKILL.md` 前 16 KiB 的元数据，正文仅在显式启用或描述匹配后按大小上限读取。新增 Skill 不能依赖 discovery 阶段执行代码。
+
+MCP 的默认 lifecycle 是 `lazy`。`mcp_status` 不应启动外部连接；配置中 server name 必须唯一，非 mock server 要通过批准后的 `mcp_activate` 才能从 Runtime 注册可调用工具。`mcp_activate` 的 effect preview 必须覆盖将被启动的 server 配置（包括 timeout），配置文件改变后旧审批必须变 stale，激活时会刷新未激活配置以确保启动的目标与 preview 一致。注意 SDK 的 resources/prompts 发现方法是显式外部操作，当前会自行激活 server；它们不应被误描述为“无连接的状态查询”。
+
+## Workspace 信任前提
+
+模型连接配置默认从用户级配置或进程环境读取；workspace 的 `.codemuse/config.json` 无法覆盖 provider、`base_url` 或 `api_key_env`，目标 workspace 的 `.env` 也不会被启动脚本自动加载。MCP 配置仍可声明 command、args 或 URL，但非 mock server 必须经过 `mcp_activate` 的精确审批。已审查的本地 workspace 可显式设置 `CODEMUSE_TRUST_WORKSPACE_MODEL_CONFIG=1` 或 `CODEMUSE_TRUST_WORKSPACE_ENV=1` 恢复对应兼容行为。工程尚无 workspace trust 提示、配置签名和每仓库密钥隔离机制，因此测试不可信仓库时仍应使用无真实密钥的隔离进程或受限环境。

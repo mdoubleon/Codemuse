@@ -177,12 +177,37 @@ def list_session_tree(workspace: Path) -> list[dict[str, Any]]:
     return build_session_tree(list_sessions(workspace))
 
 
-def fork_session(workspace: Path, parent_session_id: str) -> dict[str, Any]:
+def resume_session(workspace: Path, session_id: str) -> dict[str, Any]:
+    """Load a persisted session without running a new model turn."""
+    return _session_store(workspace.resolve()).load(session_id).to_dict()
+
+
+def fork_session(
+    workspace: Path,
+    parent_session_id: str,
+    *,
+    head_id: str | None = None,
+) -> dict[str, Any]:
     """分支一个已保存会话，并返回独立持久化的子会话。"""
     store = _session_store(workspace.resolve())
-    child = store.fork(parent_session_id)
+    child = store.fork_from_head(parent_session_id, head_id) if head_id else store.fork(parent_session_id)
     store.save(child)
     return child.to_dict()
+
+
+def branch_session(workspace: Path, parent_session_id: str, *, head_id: str | None = None) -> dict[str, Any]:
+    """Alias for fork_session that makes branch intent explicit to callers."""
+    return fork_session(workspace, parent_session_id, head_id=head_id)
+
+
+def navigate_session_head(workspace: Path, session_id: str, head_id: str) -> dict[str, Any]:
+    """Move the active view to a retained turn-tree head without deleting siblings."""
+    record = _session_store(workspace.resolve()).set_active_head(session_id, head_id)
+    return {
+        "session_id": record.session_id,
+        "active_head_id": record.active_head_id,
+        "message_count": len(record.messages),
+    }
 
 
 def list_approvals(workspace: Path, *, status: str | None = "pending") -> list[dict[str, Any]]:
@@ -238,7 +263,7 @@ def configure_model_provider(
     temperature: float | None = None,
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Select a provider and persist its complete model configuration atomically.
+    """Select a provider and persist its complete model configuration in user config.
 
     ``api_key_env`` is the *name* of an environment variable.  API key values are
     deliberately not accepted or written to the project configuration.
@@ -263,7 +288,7 @@ def configure_model_provider(
             getattr(descriptor, "default_max_tokens", None),
         ),
     }
-    return get_config_manager(workspace.resolve()).patch_project_config({"model": model_config}).to_dict()
+    return get_config_manager(workspace.resolve()).set_user_model_config(model_config).to_dict()
 
 
 def refresh_memory(workspace: Path, *, max_files: int = 300) -> dict[str, Any]:

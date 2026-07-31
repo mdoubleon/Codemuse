@@ -107,6 +107,7 @@ class SubAgentTests(unittest.TestCase):
             artifact = manager.finalize(handle)
             self.assertIsNotNone(artifact)
             assert artifact is not None
+            manager.record_review(artifact, approved=True, summary="reviewed in test")
             self.assertEqual((root / "README.md").read_text(encoding="utf-8"), "# Sample\n\nA tiny project.\n")
             preview = build_tool_effect_preview(root, "apply_patch_artifact", {"artifact_id": artifact.artifact_id})
             self.assertFalse(preview["blocked"])
@@ -142,11 +143,16 @@ class SubAgentTests(unittest.TestCase):
                 llm_factory=_EditingProvider,
             )
 
-            result = SubAgentOrchestrator(manager).run(goal="Update README", workflow="code_change", max_agents=6, allow_edits=True)
+            result = SubAgentOrchestrator(manager).run(goal="Update README", workflow="code_change", max_agents=1, allow_edits=True)
 
             self.assertTrue(result["success"], result)
+            self.assertEqual(result["max_concurrency"], 1)
+            self.assertEqual([step["node_id"] for step in result["steps"]], ["api", "memory", "repo", "plan", "patch", "review"])
+            self.assertEqual(result["execution_mode"], "isolated_worktree")
             artifact = result["artifact"]
             self.assertIsNotNone(artifact)
+            reviewed = WorktreeManager(root).load_artifact(str(artifact["artifact_id"]))
+            self.assertEqual("approved", reviewed.review_status)
             self.assertEqual("# Sample\n\nA tiny project.\n", (root / "README.md").read_text(encoding="utf-8"))
             runtime = build_agent(root)
             runtime.llm = _ArtifactApplyProvider(str(artifact["artifact_id"]))
@@ -156,6 +162,63 @@ class SubAgentTests(unittest.TestCase):
             runtime.approve(str(approval.details["approval_id"]))
             self.assertEqual("# Changed by code-worker\n", (root / "README.md").read_text(encoding="utf-8"))
             self.assertFalse(Path(str(artifact["worktree_path"])).exists())
+
+    def test_code_change_review_rejection_or_missing_decision_blocks_artifact(self) -> None:
+        for review_summary, expected_decision in [
+            ("REVIEW_DECISION: rejected", "rejected"),
+            ("Review finished without a machine-readable decision.", "missing"),
+        ]:
+            with self.subTest(review_summary=review_summary), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                _write_sample_repo(root)
+                subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+                subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True)
+                subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-m", "init"], cwd=root, check=True, capture_output=True)
+                agent = build_agent(root)
+                manager = SubAgentManager(
+                    workspace=root,
+                    parent_registry=agent.tool_registry,
+                    session_store=SessionStore(root / ".data" / "codemuse" / "sessions"),
+                    llm_factory=lambda: _ReviewDecisionProvider(review_summary),
+                )
+
+                result = SubAgentOrchestrator(manager).run(
+                    goal="Update README",
+                    workflow="code_change",
+                    max_agents=1,
+                    allow_edits=True,
+                )
+
+                self.assertFalse(result["success"], result)
+                review_step = next(step for step in result["steps"] if step["node_id"] == "review")
+                self.assertEqual("failed", review_step["status"])
+                self.assertFalse(review_step["review"]["approved"])
+                self.assertEqual(expected_decision, review_step["review"]["decision"])
+                artifact_id = str(result["artifact"]["artifact_id"])
+                artifact = WorktreeManager(root).load_artifact(artifact_id)
+                self.assertEqual("rejected", artifact.review_status)
+                with self.assertRaises(PermissionError):
+                    build_agent(root).tool_registry.execute("apply_patch_artifact", {"artifact_id": artifact_id})
+                self.assertEqual("# Sample\n\nA tiny project.\n", (root / "README.md").read_text(encoding="utf-8"))
+                WorktreeManager(root).cleanup(artifact)
+
+    def test_editable_workflow_is_staged_behind_exact_effect_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            _write_sample_repo(root)
+            agent = build_agent(root)
+            agent.memory_provider = None
+            agent.llm = _CodeChangeProvider()
+
+            events = agent.prompt("Prepare a constrained code change")
+
+            approval = next(event for event in events if event.type == "approval_required")
+            self.assertEqual(approval.tool_name, "orchestrate_code_change")
+            self.assertTrue(approval.details["exact_effect_approval"])
+            preview = approval.details["effect_preview"]
+            self.assertEqual(preview["execution_boundary"], "isolated_git_worktree")
+            self.assertFalse(preview["parent_workspace_mutated"])
+            self.assertEqual("# Sample\n\nA tiny project.\n", (root / "README.md").read_text(encoding="utf-8"))
 
 
 def _write_sample_repo(root: Path) -> None:
@@ -178,7 +241,32 @@ class _EditingProvider:
         if "write_file" in available and not self._used_tool:
             self._used_tool = True
             return LLMResponse(tool_calls=[ToolCall(id="write-1", name="write_file", arguments={"path": "README.md", "content": "# Changed by code-worker\n", "overwrite": True})])
-        return LLMResponse(text="completed")
+        return LLMResponse(text="REVIEW_DECISION: approved")
+
+
+class _ReviewDecisionProvider:
+    def __init__(self, review_summary: str) -> None:
+        self.review_summary = review_summary
+        self._used_tool = False
+
+    @property
+    def info(self) -> LLMProviderInfo:
+        return LLMProviderInfo(provider="test", model="review-decision-test")
+
+    def complete(self, messages, tools) -> LLMResponse:
+        available = {tool.name for tool in tools}
+        if "write_file" in available and not self._used_tool:
+            self._used_tool = True
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="write-1",
+                        name="write_file",
+                        arguments={"path": "README.md", "content": "# Changed by code-worker\n", "overwrite": True},
+                    )
+                ]
+            )
+        return LLMResponse(text=self.review_summary)
 
 
 class _ArtifactApplyProvider:
@@ -195,6 +283,29 @@ class _ArtifactApplyProvider:
             self._used_tool = True
             return LLMResponse(tool_calls=[ToolCall(id="artifact-1", name="apply_patch_artifact", arguments={"artifact_id": self.artifact_id})])
         return LLMResponse(text="applied")
+
+
+class _CodeChangeProvider:
+    def __init__(self) -> None:
+        self._used_tool = False
+
+    @property
+    def info(self) -> LLMProviderInfo:
+        return LLMProviderInfo(provider="test", model="code-change-approval")
+
+    def complete(self, messages, tools) -> LLMResponse:
+        if not self._used_tool:
+            self._used_tool = True
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="code-change-1",
+                        name="orchestrate_code_change",
+                        arguments={"goal": "Update README", "max_agents": 1},
+                    )
+                ]
+            )
+        return LLMResponse(text="staged")
 
 
 if __name__ == "__main__":

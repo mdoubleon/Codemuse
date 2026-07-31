@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from codemuse.tools.base import BaseTool, ToolResult, ToolSpec
 from codemuse.tools.metadata import ToolMetadata
+from codemuse.tools.validation import validate_tool_arguments
 
 ToolFactory = Callable[[], BaseTool]
 
@@ -110,7 +111,13 @@ class ToolRegistry:
     def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         """执行已通过注册表和策略检查的工具动作。"""
         tool = self.get(name)
+        validated_arguments = self.validate_arguments(name, arguments)
         if not tool.spec.model_callable:
             raise PermissionError(f"Tool is not model-callable: {name}")
         # 是否需要审批由 AgentRuntime 统一判断；registry 只负责找到工具并执行。
-        return tool.execute(arguments)
+        return tool.execute(validated_arguments)
+
+    def validate_arguments(self, name: str, arguments: Any) -> dict[str, Any]:
+        """Validate a call against the tool's JSON Schema before any side effect."""
+        spec = self.get_spec(name)
+        return validate_tool_arguments(name, arguments, spec.parameters)

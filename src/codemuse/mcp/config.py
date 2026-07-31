@@ -15,6 +15,31 @@ class MCPTransportSettings:
     lifecycle: str = "lazy"
     direct_tools: bool = False
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "MCPTransportSettings":
+        data = dict(payload or {})
+        unknown = set(data) - {"tool_prefix", "idle_timeout", "lifecycle", "direct_tools"}
+        if unknown:
+            raise ValueError(f"Unknown MCP settings field: {sorted(unknown)[0]}")
+        tool_prefix = str(data.get("tool_prefix") or "mcp").strip()
+        if not tool_prefix:
+            raise ValueError("MCP settings.tool_prefix cannot be empty")
+        lifecycle = str(data.get("lifecycle") or "lazy").strip().lower()
+        if lifecycle not in {"lazy", "eager"}:
+            raise ValueError("MCP settings.lifecycle must be 'lazy' or 'eager'")
+        idle_timeout = data.get("idle_timeout", 300)
+        if isinstance(idle_timeout, bool) or not isinstance(idle_timeout, int) or not 1 <= idle_timeout <= 86_400:
+            raise ValueError("MCP settings.idle_timeout must be an integer between 1 and 86400")
+        direct_tools = data.get("direct_tools", False)
+        if not isinstance(direct_tools, bool):
+            raise ValueError("MCP settings.direct_tools must be a boolean")
+        return cls(
+            tool_prefix=tool_prefix,
+            idle_timeout=idle_timeout,
+            lifecycle=lifecycle,
+            direct_tools=direct_tools,
+        )
+
 
 @dataclass
 class MCPToolConfig:
@@ -139,6 +164,7 @@ def load_mcp_config(workspace: Path, config_paths: list[Path] | None = None) -> 
         loaded = _parse_mcp_document(path)
         document.settings = loaded.settings
         document.servers.extend(loaded.servers)
+    _assert_unique_server_names(document.servers)
     return document
 
 
@@ -155,7 +181,10 @@ def _parse_mcp_document(path: Path) -> MCPConfigDocument:
     if not isinstance(data, dict):
         raise ValueError(f"MCP config must be a list or object: {path}")
 
-    settings = MCPTransportSettings(**dict(data.get("settings", {})))
+    raw_settings = data.get("settings", {})
+    if not isinstance(raw_settings, dict):
+        raise ValueError(f"MCP settings must be an object: {path}")
+    settings = MCPTransportSettings.from_dict(raw_settings)
     if isinstance(data.get("mcpServers"), dict):
         raw_servers = []
         for name, value in data["mcpServers"].items():
@@ -165,3 +194,14 @@ def _parse_mcp_document(path: Path) -> MCPConfigDocument:
     else:
         raw_servers = data.get("servers", [])
     return MCPConfigDocument(settings=settings, servers=[MCPServerConfig.from_dict(item) for item in raw_servers])
+
+
+def _assert_unique_server_names(servers: list[MCPServerConfig]) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for server in servers:
+        if server.name in seen:
+            duplicates.add(server.name)
+        seen.add(server.name)
+    if duplicates:
+        raise ValueError(f"Duplicate MCP server name: {sorted(duplicates)[0]}")

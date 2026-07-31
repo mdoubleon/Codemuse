@@ -124,7 +124,7 @@ bailian             已实现，缺少 API key 时仅报告 readiness
 deepseek            已实现，使用 DEEPSEEK_API_KEY 和 DeepSeek 专用默认值
 ```
 
-Provider 的选择由 `models use <provider>`、Web 工作台或 `.codemuse/config.json` 完成。配置中只保存 `api_key_env` 的环境变量名；`scripts/run_agent.py` 和 `scripts/run_server.py` 都从 `.env` 或进程环境变量读取真实密钥。
+Provider 的选择由 `models use <provider>`、Web 工作台、用户级配置或进程环境变量完成。workspace `.codemuse/config.json` 默认不能设置 provider、endpoint 或 `api_key_env`；`scripts/run_agent.py` 和 `scripts/run_server.py` 只读取 CodeMuse 自身目录的 `.env`，不自动读取目标 workspace 的 `.env`。
 
 `FakeLLM` 会根据用户输入用规则模拟模型行为，例如看到 `list files` 就生成 `ToolCall(name="list_files")`。
 

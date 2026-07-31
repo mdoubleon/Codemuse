@@ -314,11 +314,14 @@ class ServerApiTests(unittest.TestCase):
                 base = f"http://127.0.0.1:{server.server_address[1]}"
                 providers = _json_request(f"{base}/api/models/providers")
                 readiness = _json_request(f"{base}/api/models/readiness")
-                updated = _json_request(
-                    f"{base}/api/config/set",
-                    method="POST",
-                    payload={"path": "model.provider", "value": "openai_compatible"},
-                )
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    _json_request(
+                        f"{base}/api/config/set",
+                        method="POST",
+                        payload={"path": "model.provider", "value": "openai_compatible"},
+                    )
+                self.assertEqual(raised.exception.code, 400)
+                raised.exception.close()
                 config = _json_request(f"{base}/api/config")
 
                 providers_by_name = {item["name"]: item for item in providers["providers"]}
@@ -327,8 +330,7 @@ class ServerApiTests(unittest.TestCase):
                 self.assertEqual(providers_by_name["deepseek"]["default_base_url"], "https://api.deepseek.com/v1")
                 self.assertEqual(providers_by_name["deepseek"]["default_api_key_env"], "DEEPSEEK_API_KEY")
                 self.assertTrue(any(item["name"] == "fake" for item in readiness["providers"]))
-                self.assertEqual(updated["config"]["model"]["provider"], "openai_compatible")
-                self.assertEqual(config["config"]["model"]["provider"], "openai_compatible")
+                self.assertEqual(config["config"]["model"]["provider"], "fake")
             finally:
                 server.shutdown()
                 server.server_close()

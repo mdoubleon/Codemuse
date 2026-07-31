@@ -136,11 +136,61 @@ class OrchestrateAgentsTool(BaseTool):
         goal = str(arguments.get("goal") or "").strip()
         if not goal:
             raise ValueError("orchestrate_agents requires a goal")
+        if bool(arguments.get("allow_edits", False)):
+            raise PermissionError(
+                "Use orchestrate_code_change for isolated code changes; it requires explicit approval."
+            )
         result = self.orchestrator.run(
             goal=goal,
             workflow=str(arguments.get("workflow") or "research"),
             max_agents=int(arguments.get("max_agents") or 4),
-            allow_edits=bool(arguments.get("allow_edits", False)),
+            allow_edits=False,
+        )
+        return ToolResult(
+            tool_name=self.spec.name,
+            content=json.dumps(result, ensure_ascii=False, indent=2),
+            details={"orchestration": result},
+        )
+
+
+class OrchestrateCodeChangeTool(BaseTool):
+    """Run the editable workflow only after the normal exact-effect approval."""
+
+    def __init__(self, workspace: Path, manager: SubAgentManager) -> None:
+        super().__init__(workspace)
+        self.orchestrator = SubAgentOrchestrator(manager)
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="orchestrate_code_change",
+            description=(
+                "Research, plan, implement in an isolated Git worktree, and review a code change. "
+                "The parent workspace is unchanged until a reviewed patch artifact is separately approved."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "minLength": 1},
+                    "max_agents": {"type": "integer", "minimum": 1, "maximum": 4},
+                },
+                "required": ["goal"],
+                "additionalProperties": False,
+            },
+            permission_domain="write",
+            requires_confirmation=True,
+            side_effect=True,
+        )
+
+    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        goal = str(arguments.get("goal") or "").strip()
+        if not goal:
+            raise ValueError("orchestrate_code_change requires a goal")
+        result = self.orchestrator.run(
+            goal=goal,
+            workflow="code_change",
+            max_agents=int(arguments.get("max_agents") or 4),
+            allow_edits=True,
         )
         return ToolResult(
             tool_name=self.spec.name,
@@ -168,6 +218,10 @@ class ApplyPatchArtifactTool(BaseTool):
         artifact = manager.load_artifact(str(arguments.get("artifact_id") or ""))
         if artifact.status == "applied":
             raise ValueError(f"Patch artifact already applied: {artifact.artifact_id}")
+        if artifact.review_status != "approved":
+            raise PermissionError(
+                f"Patch artifact has not passed review: {artifact.artifact_id} ({artifact.review_status})"
+            )
         if not manager.apply_check(artifact):
             raise RuntimeError("Patch artifact no longer applies cleanly to the parent workspace")
         if not manager.apply(artifact):
@@ -185,4 +239,5 @@ def register_subagent_tools(registry, workspace: Path, manager: SubAgentManager)
     registry.register(SpawnSubAgentTool(workspace, manager), category="subagent")
     registry.register(RunSubAgentPlanTool(workspace, manager), category="subagent")
     registry.register(OrchestrateAgentsTool(workspace, manager), category="subagent")
+    registry.register(OrchestrateCodeChangeTool(workspace, manager), category="subagent")
     registry.register(ApplyPatchArtifactTool(workspace), category="subagent")
